@@ -137,6 +137,7 @@ TEST_CASE("switching to xray renames interfaces and rolls back a failed start") 
         },
         [] { return true; });
     int starts = 0;
+    std::string tested_config;
     auto hooks = [&](const std::string& version, bool xray_starts, int test_code) {
         service.set_core_hooks(
             [&, xray_starts](const std::string& core, const std::string& action, const std::string&, const std::string&) {
@@ -144,7 +145,8 @@ TEST_CASE("switching to xray renames interfaces and rolls back a failed start") 
                 if (core == "xray" && action == "start") return xray_starts;
                 return true;
             },
-            [test_code](const std::string&, const std::string&, std::string* error) {
+            [test_code, &tested_config](const std::string&, const std::string& config, std::string* error) {
+                tested_config = config;
                 if (test_code != 0 && error) *error = "xray run -test failed";
                 return test_code;
             },
@@ -169,6 +171,7 @@ TEST_CASE("switching to xray renames interfaces and rolls back a failed start") 
 
     hooks("26.10.29", true, 1);
     CHECK_THROWS_WITH(service.switch_core("xray", "/opt/bin/xray", false), "xray run -test failed");
+    CHECK(std::filesystem::path(tested_config).filename() == "xray.candidate.json");
     CHECK(keenetic_calls == after_add);
     CHECK(starts == 0);
     CHECK(service.state()["core"] == "sing-box");

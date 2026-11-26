@@ -52,7 +52,7 @@ bool xray_process(const std::string& action, const std::string& bin, const std::
     }
     safe_exec_capture_with_timeouts({ssd, "-K", "-p", pid}, safe_exec_timeouts(), true, 0, true, false);
     const auto result = safe_exec_capture_with_timeouts(
-        {ssd, "-S", "-b", "-m", "-p", pid, "-x", bin, "--", "run", "-c", config},
+        {ssd, "-S", "-b", "-m", "-p", pid, "-x", bin, "--", "run", "-format", "json", "-c", config},
         safe_exec_timeouts(), true, 0, true, false);
     return result.exit_code == 0;
 }
@@ -101,7 +101,7 @@ SingboxLinkService make_singbox_link_service() {
         },
         [](const std::string& bin, const std::string& config, std::string* error) {
             const auto result = safe_exec_capture_with_timeouts(
-                {bin, "run", "-test", "-c", config}, safe_exec_timeouts(), false, std::size_t{2} * 1024U, true, true);
+                {bin, "run", "-test", "-format", "json", "-c", config}, safe_exec_timeouts(), false, std::size_t{2} * 1024U, true, true);
             if (error) *error = result.timed_out ? "xray run -test timed out" : result.stdout_output;
             return result.exit_code;
         },

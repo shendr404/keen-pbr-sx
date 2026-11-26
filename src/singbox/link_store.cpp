@@ -76,9 +76,36 @@ void write_private(const std::string& path, const std::string& body) {
     }
 }
 
-std::string backup_of(const std::string& path) { return path + ".bak-keenpbr"; }
+// Xray infers config format from the extension; sidecar names must end in .json.
+std::string json_sidecar(const std::string& path, const std::string& role) {
+    static const std::string ext = ".json";
+    if (path.size() >= ext.size() && path.compare(path.size() - ext.size(), ext.size(), ext) == 0) {
+        return path.substr(0, path.size() - ext.size()) + "." + role + ".json";
+    }
+    return path + "." + role + ".json";
+}
 
-std::string original_backup_of(const std::string& path) { return path + ".bak-keenpbr-original"; }
+std::string path_basename(const std::string& path) {
+    const auto slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+// Only Xray sidecars need a trailing .json; sing-box check accepts any name, and
+// existing routers already have config.json.bak-keenpbr.
+bool xray_json_path(const std::string& path) { return path_basename(path) == "xray.json"; }
+
+std::string backup_of(const std::string& path) {
+    return xray_json_path(path) ? json_sidecar(path, "bak-keenpbr") : path + ".bak-keenpbr";
+}
+
+std::string original_backup_of(const std::string& path) {
+    return xray_json_path(path) ? json_sidecar(path, "bak-keenpbr-original")
+                                : path + ".bak-keenpbr-original";
+}
+
+std::string candidate_of(const std::string& path) {
+    return xray_json_path(path) ? json_sidecar(path, "candidate") : path + ".candidate";
+}
 
 bool backup_file(const std::string& path) {
     const auto body = read_file(path);
@@ -1320,7 +1347,7 @@ SingboxApplyResult SingboxLinkService::persist(const SingboxStore& previous, Sin
         } else if (xray) {
             const auto body = rendered.dump(2);
             if (read_file(xray_config_) != body) {
-                const auto candidate = xray_config_ + ".candidate";
+                const auto candidate = candidate_of(xray_config_);
                 write_private(candidate, body);
                 std::string error;
                 const int code = xray_test_ ? xray_test_(resolve_xray_binary(xray_bin_), candidate, &error) : 0;
@@ -1873,7 +1900,7 @@ SingboxApplyResult SingboxLinkService::switch_core(const std::string& requested,
     const auto rendered = requested == "xray" ? render_xray_config(live)
                                               : merge_singbox_config(read_config_object(), live, nullptr);
     const auto target = requested == "xray" ? xray_config_ : paths_.singbox_config;
-    const auto candidate = target + ".candidate";
+    const auto candidate = candidate_of(target);
     write_private(candidate, rendered.dump(2));
     std::string error;
     int code = 0;
