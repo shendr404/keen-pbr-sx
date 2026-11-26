@@ -42,6 +42,15 @@ function localizeServerMessage(
     })
   }
   if (message.includes("vless encryption is ignored")) return t("pages.singbox.encryptionIgnored")
+  const tooOld = /^Xray (.+) is older than 26\.10\.17/.exec(message)
+  if (tooOld) return t("pages.singbox.versionTooOld", { version: tooOld[1] })
+  if (message.includes("icmptest does not measure")) return t("pages.singbox.icmptestXray")
+  if (message.includes("could not start xray")) return t("pages.singbox.startFailed")
+  if (message.includes("xray run -test")) return t("pages.singbox.testFailed")
+  const protocol = /^protocol (.+) is not supported by (Xray|sing-box)$/.exec(message)
+  if (protocol) return t("pages.singbox.unsupportedProtocol", { protocol: protocol[1], core: protocol[2] })
+  const transport = /^transport (.+) is not supported by Xray$/.exec(message)
+  if (transport) return t("pages.singbox.unsupportedTransport", { transport: transport[1] })
   return message
 }
 
@@ -131,6 +140,8 @@ export function SingboxPage() {
   const [picked, setPicked] = useState<Record<string, boolean>>({})
   const [error, setError] = useState("")
   const [success, setSuccess] = useState("")
+  const [coreDraft, setCoreDraft] = useState<string | null>(null)
+  const [binDraft, setBinDraft] = useState<string | null>(null)
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey })
   const fail = (caught: unknown) => {
@@ -199,10 +210,63 @@ export function SingboxPage() {
 
   const nodes = stateQuery.data?.nodes ?? []
   const subscriptions = stateQuery.data?.subscriptions ?? []
+  const coreValue = coreDraft ?? stateQuery.data?.core ?? "sing-box"
+  const binValue = binDraft ?? stateQuery.data?.xray_bin ?? ""
+  const switchCore = useMutation({
+    mutationFn: () => postSingbox("/api/sing-box/core", { core: coreValue, xray_bin: binValue }),
+    onMutate: () => {
+      setError("")
+      setSuccess("")
+    },
+    onSuccess: async (state) => {
+      setCoreDraft(null)
+      setBinDraft(null)
+      setSuccess(noticeText(state, t, t("pages.singbox.coreSaved")))
+      await invalidate()
+    },
+    onError: fail,
+  })
+  const ramMb = Math.round((stateQuery.data?.ram_kib ?? 0) / 1024)
 
   return (
     <div className="grid gap-6">
       <PageHeader description={t("pages.singbox.description")} title={t("pages.singbox.title")} />
+      <section className="grid gap-3 rounded-xl border border-border p-4">
+        <h2 className="text-base font-medium">{t("pages.singbox.core")}</h2>
+        <p className="text-xs text-muted-foreground">{t("pages.singbox.coreHint")}</p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-1.5">
+            <Label htmlFor="proxy-core">{t("pages.singbox.core")}</Label>
+            <select
+              className={nativeSelectClass}
+              id="proxy-core"
+              onChange={(event) => setCoreDraft(event.target.value)}
+              value={coreValue}
+            >
+              <option value="sing-box">sing-box</option>
+              <option value="xray">Xray</option>
+            </select>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="xray-bin">{t("pages.singbox.xrayBin")}</Label>
+            <Input id="xray-bin" onChange={(event) => setBinDraft(event.target.value)} value={binValue} />
+            <p className="text-xs text-muted-foreground">{t("pages.singbox.xrayBinHint")}</p>
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {stateQuery.data?.xray_version
+            ? t("pages.singbox.xrayVersion", { version: stateQuery.data.xray_version })
+            : t("pages.singbox.xrayVersionUnknown")}
+        </p>
+        {stateQuery.data?.ram_warning ? (
+          <Alert>
+            <AlertDescription>{t("pages.singbox.ramWarning", { mb: ramMb })}</AlertDescription>
+          </Alert>
+        ) : null}
+        <Button disabled={switchCore.isPending} onClick={() => switchCore.mutate()}>
+          {t("pages.singbox.switchCore")}
+        </Button>
+      </section>
       <section className="grid gap-3 rounded-xl border border-border p-4">
         <h2 className="text-base font-medium">{t("pages.singbox.create")}</h2>
         <Label htmlFor="singbox-links">{t("pages.singbox.links")}</Label>
@@ -385,7 +449,7 @@ function NodeCard({
       </div>
       <p className="text-sm text-muted-foreground">{node.name}</p>
       {node.unsupported && node.unsupported_reason ? (
-        <p className="text-sm text-destructive">{node.unsupported_reason}</p>
+        <p className="text-sm text-destructive">{localizeServerMessage(node.unsupported_reason, t)}</p>
       ) : null}
       <div className="flex flex-wrap gap-2">
         <Button onClick={() => setEditing((value) => !value)} size="sm" variant="outline">

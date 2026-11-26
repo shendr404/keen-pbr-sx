@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -99,11 +100,27 @@ struct SingboxApplyResult {
 
 // nodes is the full set that should exist. removed_tags are keen-pbr-sx tags that
 // this change drops. owned_tags are the tags this store already managed.
+struct InterfaceRename {
+    std::string tag;
+    std::string from;
+    std::string to;
+};
+
 struct KeeneticSyncRequest {
     std::vector<SingboxNode> nodes;
     std::vector<std::string> removed_tags;
     std::vector<std::string> owned_tags;
+    // Old TUN name -> new TUN name. Group members that used the old name are rewritten.
+    std::vector<InterfaceRename> renames;
+    // When set, written into config.proxy in the same save as the outbounds.
+    nlohmann::json proxy;
+    bool has_proxy{false};
 };
+
+// Group members name outbound tags. Tags stay put across a core switch, so a
+// member equal to the tag is left alone. A member that instead stored the old
+// TUN name is rewritten to the new one (xrtun, xrtun2, ...).
+void apply_interface_renames(nlohmann::json& config, const std::vector<InterfaceRename>& renames);
 
 using SingboxCheck = std::function<int(const std::string& config_path, std::string* error)>;
 using KeeneticSyncFn = std::function<void(const KeeneticSyncRequest& request)>;
@@ -111,19 +128,66 @@ using SingboxReloadFn = std::function<bool()>;
 using SubscriptionStopFn = std::function<bool()>;
 using SubscriptionDownloadFn = std::function<std::string(const std::string&, const SubscriptionStopFn&)>;
 using SubscriptionClock = std::function<std::int64_t()>;
+// core is "sing-box" or "xray". action is "start", "stop" or "alive" (is the
+// process running; nothing is changed).
+// bin and config are the xray executable and xray.json; they are empty for sing-box.
+using CoreProcessFn = std::function<bool(const std::string& core, const std::string& action,
+                                          const std::string& bin, const std::string& config)>;
+using XrayTestFn = std::function<int(const std::string& bin, const std::string& config_path, std::string* error)>;
+using XrayVersionFn = std::function<std::string(const std::string& bin)>;
+using RamFn = std::function<long()>;
+// True once every named interface exists and is up. Gives up after timeout_ms.
+using InterfaceWaitFn = std::function<bool(const std::vector<std::string>& names, int timeout_ms)>;
 
 class SingboxBusy : public std::runtime_error {
 public:
     SingboxBusy() : std::runtime_error("another sing-box operation is in progress") {}
 };
 
+// Outcome of making the configured core run at daemon start or on reload.
+struct CoreStartResult {
+    bool ok{true};
+    // True when Xray was (re)started or xray.json was rewritten.
+    bool changed{false};
+    std::string core;
+    std::string message;
+};
+
 class SingboxLinkService {
 public:
     SingboxLinkService(SingboxPaths paths, SingboxCheck check, KeeneticSyncFn keenetic,
                        SingboxReloadFn reload, SubscriptionDownloadFn download = {},
-                       SubscriptionClock clock = {});
+                       SubscriptionClock clock = {}, CoreProcessFn process = {}, XrayTestFn test = {},
+                       XrayVersionFn version = {}, RamFn ram = {}, InterfaceWaitFn wait = {});
 
     void set_keenetic_callback(KeeneticSyncFn keenetic) { keenetic_ = std::move(keenetic); }
+    void set_proxy(std::string core, std::string xray_bin);
+    void set_core_hooks(CoreProcessFn process, XrayTestFn test, XrayVersionFn version, RamFn ram);
+    void set_interface_wait(InterfaceWaitFn wait, int timeout_ms = 20000) {
+        interface_wait_ = std::move(wait);
+        interface_wait_ms_ = timeout_ms;
+    }
+    // One core for the router. Recreates TUN names (sbtun* or xrtun*) and
+    // asks keenetic sync to retarget interface outbounds and group members.
+    // keen_config is the current keen-pbr-sx config. Switching to Xray is
+    // refused when a route rule or DNS detour would be left on a TUN that stops
+    // with sing-box. Xray starts first; sing-box stops only after the xrtun
+    // interfaces are up.
+    SingboxApplyResult switch_core(const std::string& core, const std::string& xray_bin, bool icmptest_groups,
+                                   const nlohmann::json& keen_config = nlohmann::json());
+    // proxy.core=xray at daemon start or reload: regenerate xray.json from the
+    // store, start Xray when it is not already running with that file, wait for
+    // every xrtun, then make sure sing-box is off. proxy.core=sing-box does
+    // nothing. There is no fallback to sing-box: on failure the error is kept
+    // (core_error) and sing-box stays off. Never throws.
+    CoreStartResult ensure_core_running();
+    // Stops a sing-box that something else (its own init) started while
+    // proxy.core is xray. True when it was running and has been stopped.
+    bool stop_stray_singbox();
+    // Last ensure_core_running failure, empty when the last attempt worked.
+    std::string core_error() const;
+    // Core, process and interface state for `keen-pbr-sx core status`.
+    nlohmann::json core_status() const;
     nlohmann::json preview(const std::string& link) const;
     // Downloads a subscription and returns nodes plus skipped lines. Does not save.
     nlohmann::json preview_subscription(const std::string& url_or_id) const;
@@ -175,12 +239,23 @@ private:
     static void write_store(const std::string& path, const SingboxStore& store);
     nlohmann::json public_state(const SingboxStore& store) const;
 
+    std::string tun_prefix() const;
     SingboxPaths paths_;
     SingboxCheck check_;
     KeeneticSyncFn keenetic_;
     SingboxReloadFn reload_;
     SubscriptionDownloadFn download_;
     SubscriptionClock clock_;
+    std::string proxy_core_{"sing-box"};
+    std::string xray_bin_;
+    std::string xray_config_{"/opt/etc/keen-pbr-sx/xray.json"};
+    CoreProcessFn core_process_;
+    XrayTestFn xray_test_;
+    mutable XrayVersionFn xray_version_;
+    mutable RamFn ram_;
+    InterfaceWaitFn interface_wait_;
+    int interface_wait_ms_{20000};
+    std::string core_error_;
     std::mutex mutation_mutex_;
     mutable std::mutex status_mutex_;
     std::map<std::string, RefreshStatus> refresh_status_;
@@ -192,5 +267,9 @@ bool safe_interface_name(const std::string& name);
 std::string format_singbox_check_error(int exit_code, bool timed_out, const std::string& output);
 // Empty when tag is unused. Otherwise names the route rules and urltest/icmptest groups.
 std::string outbound_reference_message(const nlohmann::json& config, const std::string& tag);
+// Empty when nothing in use depends on the vanishing TUN interfaces. Otherwise
+// names the route rules and DNS servers that would lose their path. A
+// urltest/icmptest group counts as lost only when every member is lost.
+std::string core_switch_blockers(const nlohmann::json& config, const std::set<std::string>& vanishing);
 
 }  // namespace keen_pbr3

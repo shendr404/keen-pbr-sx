@@ -1,4 +1,5 @@
 #include "link_parser.hpp"
+#include "xray_config.hpp"
 
 #include <cctype>
 #include <cstdint>
@@ -483,14 +484,35 @@ static std::string transport_of(const nlohmann::json& outbound) {
     return outbound["transport"].value("type", "");
 }
 
-std::vector<SubscriptionNode> parse_subscription(const std::string& body, SubscriptionParseInfo* info) {
+std::vector<SubscriptionNode> parse_subscription(const std::string& body, SubscriptionParseInfo* info,
+                                                  const std::string& core) {
     SubscriptionParseInfo local;
     std::vector<SubscriptionNode> nodes;
     const auto add_link = [&](const std::string& line) {
+        if (core == "xray") {
+            const auto view = classify_link_for_core(line, "xray");
+            if (!view.supported) {
+                note_skip(local, {},
+                          SkippedSubscriptionNode{view.name.empty() ? link_fragment(line) : view.name, view.protocol,
+                                                  view.server, view.port, view.reason});
+                return;
+            }
+            SubscriptionNode node;
+            node.link.protocol = view.protocol;
+            node.link.name = view.name;
+            node.link.server = view.server;
+            node.link.port = view.port;
+            node.link.outbound = view.outbound;
+            node.id = proxy_node_id(node.link);
+            node.raw = trim(line);
+            nodes.push_back(std::move(node));
+            return;
+        }
         try {
             SubscriptionNode node;
             node.link = parse_proxy_link(line);
             node.id = proxy_node_id(node.link);
+            node.raw = trim(line);
             for (const auto& warning : node.link.warnings) {
                 if (warning.find("encryption") != std::string::npos) ++local.encryption_ignored;
             }

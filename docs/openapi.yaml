@@ -1086,6 +1086,28 @@ components:
           $ref: "#/components/schemas/ListsAutoupdateConfig"
         intercept:
           $ref: "#/components/schemas/InterceptConfig"
+        proxy:
+          $ref: "#/components/schemas/ProxyConfig"
+
+    ProxyConfig:
+      type: object
+      description: >
+        Which proxy core owns the per-node TUN interfaces. One core runs for
+        the whole router. sing-box uses sbtun, sbtun2, ... and Xray uses
+        xrtun, xrtun2, ...
+      properties:
+        core:
+          type: string
+          description: >
+            sing-box (default) or xray. Xray older than 26.10.17 cannot be selected.
+          enum: [sing-box, xray]
+          default: sing-box
+        xray_bin:
+          type: string
+          description: >
+            Path to the xray binary. Empty searches /opt/bin/xray,
+            /opt/usr/bin/xray, then PATH. Xray is an optional Entware package
+            and is not shipped inside keen-pbr-sx.
 
     AuthPasswordRequest:
       type: object
@@ -2307,6 +2329,8 @@ components:
           $ref: "#/components/schemas/ListsAutoupdateConfig"
         intercept:
           $ref: "#/components/schemas/InterceptConfig"
+        proxy:
+          $ref: "#/components/schemas/ProxyConfig"
       example:
         daemon:
           pid_file: "/var/run/keen-pbr-sx.pid"

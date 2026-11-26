@@ -21,6 +21,7 @@ export * from './cacheMetadata';
 export * from './checkStatus';
 export * from './circuitBreakerConfig';
 export * from './configObject';
+export * from './proxyConfig';
 export * from './configObjectLists';
 export * from './configStateResponse';
 export * from './configStateResponseListRefreshState';

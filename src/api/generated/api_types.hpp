@@ -243,6 +243,11 @@ namespace api {
         std::optional<std::string> start;
     };
 
+    struct ProxyConfig {
+        std::optional<std::string> core;
+        std::optional<std::string> xray_bin;
+    };
+
     struct Marker {
         std::optional<std::string> answer_ipv4;
         std::optional<std::string> domain;
@@ -375,6 +380,7 @@ namespace api {
         std::optional<std::map<std::string, ListConfigValue>> lists;
         std::optional<ListsAutoupdate> lists_autoupdate;
         std::optional<std::vector<OutboundElement>> outbounds;
+        std::optional<ProxyConfig> proxy;
         std::optional<Route> route;
         std::optional<std::string> version;
     };
@@ -389,6 +395,7 @@ namespace api {
         std::optional<std::map<std::string, ListConfigValue>> lists;
         std::optional<ListsAutoupdate> lists_autoupdate;
         std::optional<std::vector<OutboundElement>> outbounds;
+        std::optional<ProxyConfig> proxy;
         std::optional<Route> route;
         std::optional<std::string> version;
     };
@@ -1249,6 +1256,9 @@ namespace api {
     void from_json(const json & j, Fwmark & x);
     void to_json(json & j, const Fwmark & x);
 
+    void from_json(const json & j, ProxyConfig & x);
+    void to_json(json & j, const ProxyConfig & x);
+
     void from_json(const json & j, Marker & x);
     void to_json(json & j, const Marker & x);
 
@@ -1960,6 +1970,17 @@ namespace api {
         x.start = get_stack_optional<std::string>(j, "start");
     }
 
+    inline void from_json(const json & j, ProxyConfig& x) {
+        x.core = get_stack_optional<std::string>(j, "core");
+        x.xray_bin = get_stack_optional<std::string>(j, "xray_bin");
+    }
+
+    inline void to_json(json & j, const ProxyConfig & x) {
+        j = json::object();
+        j["core"] = x.core;
+        j["xray_bin"] = x.xray_bin;
+    }
+
     inline void to_json(json & j, const Fwmark & x) {
         j = json::object();
         j["mask"] = x.mask;
@@ -2217,6 +2238,7 @@ namespace api {
         x.lists = get_stack_optional<std::map<std::string, ListConfigValue>>(j, "lists");
         x.lists_autoupdate = get_stack_optional<ListsAutoupdate>(j, "lists_autoupdate");
         x.outbounds = get_stack_optional<std::vector<OutboundElement>>(j, "outbounds");
+        x.proxy = get_stack_optional<ProxyConfig>(j, "proxy");
         x.route = get_stack_optional<Route>(j, "route");
         x.version = get_stack_optional<std::string>(j, "version");
     }
@@ -2233,6 +2255,7 @@ namespace api {
         j["lists"] = x.lists;
         j["lists_autoupdate"] = x.lists_autoupdate;
         j["outbounds"] = x.outbounds;
+        j["proxy"] = x.proxy;
         j["route"] = x.route;
         j["version"] = x.version;
     }
@@ -2247,6 +2270,7 @@ namespace api {
         x.lists = get_stack_optional<std::map<std::string, ListConfigValue>>(j, "lists");
         x.lists_autoupdate = get_stack_optional<ListsAutoupdate>(j, "lists_autoupdate");
         x.outbounds = get_stack_optional<std::vector<OutboundElement>>(j, "outbounds");
+        x.proxy = get_stack_optional<ProxyConfig>(j, "proxy");
         x.route = get_stack_optional<Route>(j, "route");
         x.version = get_stack_optional<std::string>(j, "version");
     }
@@ -2262,6 +2286,7 @@ namespace api {
         j["lists"] = x.lists;
         j["lists_autoupdate"] = x.lists_autoupdate;
         j["outbounds"] = x.outbounds;
+        j["proxy"] = x.proxy;
         j["route"] = x.route;
         j["version"] = x.version;
     }

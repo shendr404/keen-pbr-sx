@@ -1,4 +1,5 @@
 #include "link_store.hpp"
+#include "xray_config.hpp"
 #include "link_parser.hpp"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <fstream>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -75,9 +77,36 @@ void write_private(const std::string& path, const std::string& body) {
     }
 }
 
-std::string backup_of(const std::string& path) { return path + ".bak-keenpbr"; }
+// Xray infers config format from the extension; sidecar names must end in .json.
+std::string json_sidecar(const std::string& path, const std::string& role) {
+    static const std::string ext = ".json";
+    if (path.size() >= ext.size() && path.compare(path.size() - ext.size(), ext.size(), ext) == 0) {
+        return path.substr(0, path.size() - ext.size()) + "." + role + ".json";
+    }
+    return path + "." + role + ".json";
+}
 
-std::string original_backup_of(const std::string& path) { return path + ".bak-keenpbr-original"; }
+std::string path_basename(const std::string& path) {
+    const auto slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+// Only Xray sidecars need a trailing .json; sing-box check accepts any name, and
+// existing routers already have config.json.bak-keenpbr.
+bool xray_json_path(const std::string& path) { return path_basename(path) == "xray.json"; }
+
+std::string backup_of(const std::string& path) {
+    return xray_json_path(path) ? json_sidecar(path, "bak-keenpbr") : path + ".bak-keenpbr";
+}
+
+std::string original_backup_of(const std::string& path) {
+    return xray_json_path(path) ? json_sidecar(path, "bak-keenpbr-original")
+                                : path + ".bak-keenpbr-original";
+}
+
+std::string candidate_of(const std::string& path) {
+    return xray_json_path(path) ? json_sidecar(path, "candidate") : path + ".candidate";
+}
 
 bool backup_file(const std::string& path) {
     const auto body = read_file(path);
@@ -303,7 +332,7 @@ void require_addresses(const std::string& text) {
 std::string singbox_token(const std::string& raw);
 
 std::string next_free_interface(const nlohmann::json& existing, const std::vector<SingboxNode>& nodes,
-                                const std::string& self_id) {
+                                const std::string& self_id, const std::string& prefix) {
     std::set<std::string> used;
     for (const auto& node : nodes) {
         if (node.id == self_id || node.interface_name.empty()) continue;
@@ -318,9 +347,9 @@ std::string next_free_interface(const nlohmann::json& existing, const std::vecto
             if (!iface.empty()) used.insert(iface);
         }
     }
-    if (!used.count("sbtun")) return "sbtun";
+    if (!used.count(prefix)) return prefix;
     for (int number = 2; number < 1000; ++number) {
-        const auto name = "sbtun" + std::to_string(number);
+        const auto name = prefix + std::to_string(number);
         if (name.size() > 15) break;
         if (!used.count(name)) return name;
     }
@@ -456,8 +485,14 @@ const SingboxNode* match_fresh(const SingboxNode& have, const std::vector<Singbo
 
 nlohmann::json outbound_for(const SingboxNode& node) {
     nlohmann::json outbound;
-    if (!node.link.empty()) outbound = parse_proxy_link(node.link).outbound;
-    else if (node.outbound.is_object()) outbound = node.outbound;
+    if (!node.link.empty()) {
+        try {
+            outbound = parse_proxy_link(node.link).outbound;
+        } catch (const std::exception&) {
+            if (node.outbound.is_object()) outbound = node.outbound;
+            else throw;
+        }
+    } else if (node.outbound.is_object()) outbound = node.outbound;
     else throw std::runtime_error("saved node has no proxy data");
     outbound["tag"] = node_outbound_tag(node);
     return outbound;
@@ -814,7 +849,7 @@ SingboxStore migrate_profiles(const nlohmann::json& profiles) {
             }
             if (tag_used(store.nodes, node.tag, node.id)) node.tag = allocate_tag(node.name, store.nodes, node.id);
             if (first && !profile_iface.empty()) node.interface_name = profile_iface;
-            else if (node.interface_name.empty()) node.interface_name = next_free_interface({}, store.nodes, node.id);
+            else if (node.interface_name.empty()) node.interface_name = next_free_interface({}, store.nodes, node.id, "sbtun");
             node.tun_stack = node.tun_stack.empty() ? stack : node.tun_stack;
             if (node.tun_mtu <= 0) node.tun_mtu = mtu;
             if (node.tun_address.empty()) node.tun_address = address;
@@ -930,11 +965,11 @@ SingboxCatalogEntry entry_from_node(const SingboxNode& node) {
     return entry;
 }
 
-FetchedSubscription parse_fetched(const std::string& body) {
+FetchedSubscription parse_fetched(const std::string& body, const std::string& core) {
     FetchedSubscription fetched;
     std::vector<SubscriptionNode> parsed;
     try {
-        parsed = parse_subscription(body, &fetched.info);
+        parsed = parse_subscription(body, &fetched.info, core);
     } catch (const std::runtime_error&) {
         if (fetched.info.skipped == 0) {
             auto message = subscription_warning(fetched.info);
@@ -942,7 +977,7 @@ FetchedSubscription parse_fetched(const std::string& body) {
             throw std::runtime_error(message);
         }
     }
-    for (auto& item : parsed) fetched.nodes.push_back(node_from_parsed(std::move(item.link), {}));
+    for (auto& item : parsed) fetched.nodes.push_back(node_from_parsed(std::move(item.link), std::move(item.raw)));
     assign_identities(fetched.nodes);
     for (const auto& node : fetched.nodes) fetched.catalog.push_back(entry_from_node(node));
     for (const auto& skipped : fetched.info.skipped_nodes) {
@@ -1138,6 +1173,104 @@ std::string outbound_reference_message(const nlohmann::json& config, const std::
     return message;
 }
 
+namespace {
+
+std::string text_at(const nlohmann::json& object, const char* key) {
+    if (!object.is_object() || !object.contains(key) || !object.at(key).is_string()) return {};
+    return object.at(key).get<std::string>();
+}
+
+std::vector<std::string> group_member_tags(const nlohmann::json& outbound) {
+    std::vector<std::string> tags;
+    if (!outbound.contains("outbound_groups") || !outbound.at("outbound_groups").is_array()) return tags;
+    for (const auto& group : outbound.at("outbound_groups")) {
+        if (!group.is_object()) continue;
+        for (const char* key : {"members", "outbounds", "candidates"}) {
+            if (!group.contains(key) || !group.at(key).is_array()) continue;
+            for (const auto& member : group.at(key)) {
+                if (member.is_string()) tags.push_back(member.get<std::string>());
+                else if (member.is_object() && !text_at(member, "outbound").empty()) tags.push_back(text_at(member, "outbound"));
+            }
+        }
+    }
+    return tags;
+}
+
+std::string join_names(const std::set<std::string>& names) {
+    std::string text;
+    for (const auto& name : names) {
+        if (!text.empty()) text += ", ";
+        text += name;
+    }
+    return text;
+}
+
+}  // namespace
+
+std::string core_switch_blockers(const nlohmann::json& config, const std::set<std::string>& vanishing) {
+    if (!config.is_object() || vanishing.empty()) return {};
+    std::set<std::string> lost;
+    std::set<std::string> lost_interfaces;
+    const bool has_outbounds = config.contains("outbounds") && config.at("outbounds").is_array();
+    if (has_outbounds) {
+        for (const auto& outbound : config.at("outbounds")) {
+            if (text_at(outbound, "type") != "interface") continue;
+            const auto name = text_at(outbound, "interface");
+            if (vanishing.count(name)) {
+                lost.insert(text_at(outbound, "tag"));
+                lost_interfaces.insert(name);
+            }
+        }
+        // A group is lost when every member is lost. Groups can nest.
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (const auto& outbound : config.at("outbounds")) {
+                const auto type = text_at(outbound, "type");
+                if (type != "urltest" && type != "icmptest") continue;
+                const auto tag = text_at(outbound, "tag");
+                if (tag.empty() || lost.count(tag)) continue;
+                const auto members = group_member_tags(outbound);
+                if (members.empty()) continue;
+                if (std::all_of(members.begin(), members.end(), [&](const std::string& m) { return lost.count(m) > 0; })) {
+                    lost.insert(tag);
+                    changed = true;
+                }
+            }
+        }
+    }
+    lost.erase("");
+    if (lost.empty()) return {};
+    std::vector<std::string> users;
+    if (config.contains("route") && config.at("route").is_object() && config.at("route").contains("rules") &&
+        config.at("route").at("rules").is_array()) {
+        int index = 0;
+        for (const auto& rule : config.at("route").at("rules")) {
+            ++index;
+            if (!rule.is_object()) continue;
+            if (rule.contains("enabled") && rule.at("enabled").is_boolean() && !rule.at("enabled").get<bool>()) continue;
+            const auto tag = text_at(rule, "outbound");
+            if (lost.count(tag)) users.push_back("route rule " + std::to_string(index) + " -> " + tag);
+        }
+    }
+    if (config.contains("dns") && config.at("dns").is_object() && config.at("dns").contains("servers") &&
+        config.at("dns").at("servers").is_array()) {
+        for (const auto& server : config.at("dns").at("servers")) {
+            const auto detour = text_at(server, "detour");
+            if (lost.count(detour)) users.push_back("DNS server " + text_at(server, "tag") + " (detour " + detour + ")");
+        }
+    }
+    if (users.empty()) return {};
+    std::string message = "Xray would leave ";
+    for (std::size_t i = 0; i < users.size(); ++i) {
+        if (i != 0) message += ", ";
+        message += users[i];
+    }
+    message += " without a path: " + join_names(lost_interfaces) +
+               " stop with sing-box and Xray does not replace them. Point them at an Xray interface (xrtun...) "
+               "or wan first. The core was not switched.";
+    return message;
+}
+
 nlohmann::json SingboxLinkService::render_singbox_config(const std::vector<SingboxNode>& nodes) {
     bool remove_file = false;
     return merge_singbox_config(nlohmann::json::object(), nodes, &remove_file);
@@ -1151,10 +1284,16 @@ SingboxStore SingboxLinkService::load_store(const std::string& path) {
 
 SingboxLinkService::SingboxLinkService(SingboxPaths paths, SingboxCheck check, KeeneticSyncFn keenetic,
                                        SingboxReloadFn reload, SubscriptionDownloadFn download,
-                                       SubscriptionClock clock)
+                                       SubscriptionClock clock, CoreProcessFn process, XrayTestFn test,
+                                       XrayVersionFn version, RamFn ram, InterfaceWaitFn wait)
     : paths_(std::move(paths)), check_(std::move(check)), keenetic_(std::move(keenetic)),
       reload_(std::move(reload)), download_(std::move(download)),
-      clock_(clock ? std::move(clock) : now_unix) {}
+      clock_(clock ? std::move(clock) : now_unix), core_process_(std::move(process)),
+      xray_test_(std::move(test)), xray_version_(std::move(version)), ram_(std::move(ram)),
+      interface_wait_(std::move(wait)) {
+    const auto slash = paths_.store.find_last_of('/');
+    if (slash != std::string::npos) xray_config_ = paths_.store.substr(0, slash) + "/xray.json";
+}
 
 SingboxStore SingboxLinkService::read() const {
     try {
@@ -1236,7 +1375,12 @@ nlohmann::json SingboxLinkService::public_state(const SingboxStore& store) const
     }
     return {{"nodes", std::move(nodes)},
             {"subscriptions", std::move(subscriptions)},
-            {"suggested_interface", next_free_interface(existing, store.nodes, "")}};
+            {"suggested_interface", next_free_interface(existing, store.nodes, "", tun_prefix())},
+            {"core", proxy_core_},
+            {"xray_bin", xray_bin_},
+            {"xray_version", xray_version_ ? xray_version_(resolve_xray_binary(xray_bin_)) : ""},
+            {"ram_kib", ram_ ? ram_() : 0},
+            {"ram_warning", ram_below_xray_comfort(ram_ ? ram_() : 0)}};
 }
 
 nlohmann::json SingboxLinkService::state() const { return public_state(read()); }
@@ -1281,11 +1425,18 @@ SingboxApplyResult SingboxLinkService::persist(const SingboxStore& previous, Sin
     validate_unique(next.nodes);
     ConfigWrite written;
     bool wrote_config = false;
+    const bool xray = proxy_core_ == "xray";
+    std::string active_config = xray ? xray_config_ : paths_.singbox_config;
+    std::vector<SingboxNode> live_nodes;
+    for (const auto& node : next.nodes) {
+        if (!node.unsupported) live_nodes.push_back(node);
+    }
     if (rewrite_singbox) {
         const auto existing = read_config_object();
         bool remove_file = false;
-        const auto rendered = merge_singbox_config(existing, next.nodes, &remove_file);
-        if (remove_file) {
+        const auto rendered = xray ? render_xray_config(live_nodes, live_nodes.empty())
+                                   : merge_singbox_config(existing, live_nodes, &remove_file);
+        if (!xray && remove_file) {
             preserve_original_config(paths_.singbox_config);
             written.had_config = backup_file(paths_.singbox_config);
             if (::unlink(paths_.singbox_config.c_str()) != 0 && errno != ENOENT) {
@@ -1293,6 +1444,21 @@ SingboxApplyResult SingboxLinkService::persist(const SingboxStore& previous, Sin
             }
             written.removed = true;
             wrote_config = true;
+        } else if (xray) {
+            const auto body = rendered.dump(2);
+            if (read_file(xray_config_) != body) {
+                const auto candidate = candidate_of(xray_config_);
+                write_private(candidate, body);
+                std::string error;
+                const int code = xray_test_ ? xray_test_(resolve_xray_binary(xray_bin_), candidate, &error) : 0;
+                ::unlink(candidate.c_str());
+                if (code != 0) {
+                    throw std::runtime_error(error.empty() ? "xray run -test failed" : error);
+                }
+                written.had_config = backup_file(xray_config_);
+                write_private(xray_config_, body);
+                wrote_config = true;
+            }
         } else if (read_file(paths_.singbox_config) != rendered.dump(2)) {
             written = write_checked_config(rendered);
             wrote_config = true;
@@ -1333,7 +1499,7 @@ SingboxApplyResult SingboxLinkService::persist(const SingboxStore& previous, Sin
             const bool had_store = ::access(backup_of(paths_.store).c_str(), F_OK) == 0;
             restore_backup(paths_.store, had_store);
         }
-        if (wrote_config) restore_backup(paths_.singbox_config, written.had_config);
+        if (wrote_config) restore_backup(active_config, written.had_config);
         throw;
     }
     SingboxApplyResult result;
@@ -1343,12 +1509,18 @@ SingboxApplyResult SingboxLinkService::persist(const SingboxStore& previous, Sin
     } else if (wrote_config) {
         result.singbox_checked = true;
         try {
-            result.singbox_reloaded = reload_ && reload_();
+            if (xray) {
+                result.singbox_reloaded = core_process_ && core_process_("xray", "start", xray_bin_, xray_config_);
+            } else {
+                result.singbox_reloaded = reload_ && reload_();
+            }
             if (reload_must_succeed && !result.singbox_reloaded) {
-                throw std::runtime_error("could not restart sing-box; restoring the previous configuration");
+                throw std::runtime_error(xray ? "could not restart xray; restoring the previous configuration"
+                                              : "could not restart sing-box; restoring the previous configuration");
             }
             if (!result.singbox_reloaded) {
-                result.warning = "sing-box config passed check; restart sing-box on the router to load it";
+                result.warning = xray ? "xray config passed xray run -test; start xray on the router to load it"
+                                      : "sing-box config passed check; restart sing-box on the router to load it";
             }
         } catch (const std::exception& error) {
             if (reload_must_succeed) {
@@ -1356,10 +1528,12 @@ SingboxApplyResult SingboxLinkService::persist(const SingboxStore& previous, Sin
                     const bool had_store = ::access(backup_of(paths_.store).c_str(), F_OK) == 0;
                     restore_backup(paths_.store, had_store);
                 }
-                restore_backup(paths_.singbox_config, written.had_config);
+                restore_backup(active_config, written.had_config);
                 throw;
             }
-            result.warning = std::string("sing-box config is valid but was not restarted: ") + error.what();
+            result.warning = std::string(xray ? "xray config is valid but was not restarted: "
+                                              : "sing-box config is valid but was not restarted: ") +
+                             error.what();
         }
     } else {
         result.singbox_checked = true;
@@ -1389,7 +1563,18 @@ SingboxApplyResult SingboxLinkService::add_links(const std::vector<std::string>&
             continue;
         }
         try {
-            auto parsed = parse_proxy_link(line);
+            ParsedProxyLink parsed;
+            if (proxy_core_ == "xray") {
+                const auto view = classify_link_for_core(line, "xray");
+                if (!view.supported) throw std::runtime_error(view.reason);
+                parsed.protocol = view.protocol;
+                parsed.name = view.name;
+                parsed.server = view.server;
+                parsed.port = view.port;
+                parsed.outbound = view.outbound;
+            } else {
+                parsed = parse_proxy_link(line);
+            }
             for (const auto& warning : parsed.warnings) {
                 if (warning.find("encryption") != std::string::npos) ++info.encryption_ignored;
             }
@@ -1397,7 +1582,7 @@ SingboxApplyResult SingboxLinkService::add_links(const std::vector<std::string>&
             apply_tun(node, tun);
             node.id = allocate_id(line, "n", store.nodes);
             node.tag = allocate_tag(node.name, store.nodes, node.id);
-            node.interface_name = next_free_interface(existing, store.nodes, node.id);
+            node.interface_name = next_free_interface(existing, store.nodes, node.id, tun_prefix());
             node.identity = trim(node.name).empty() ? endpoint_identity(node.protocol, node.server, node.port)
                                                      : name_identity(node.name);
             store.nodes.push_back(std::move(node));
@@ -1495,7 +1680,7 @@ nlohmann::json SingboxLinkService::preview_subscription(const std::string& url_o
     } catch (const std::exception&) {
         throw std::runtime_error("subscription download failed");
     }
-    const auto fetched = parse_fetched(body);
+    const auto fetched = parse_fetched(body, proxy_core_);
     nlohmann::json nodes = nlohmann::json::array();
     for (const auto& entry : fetched.catalog) nodes.push_back(catalog_json(entry));
     nlohmann::json json{{"nodes", std::move(nodes)}};
@@ -1519,7 +1704,7 @@ SingboxApplyResult SingboxLinkService::save_subscription(const std::string& url,
     } catch (const std::exception&) {
         throw std::runtime_error("subscription download failed");
     }
-    const auto fetched = parse_fetched(body);
+    const auto fetched = parse_fetched(body, proxy_core_);
     auto store = read();
     const auto previous = store;
     SingboxSubscription* subscription = nullptr;
@@ -1571,7 +1756,7 @@ SingboxApplyResult SingboxLinkService::save_subscription(const std::string& url,
         node.subscription_id = subscription->id;
         node.id = allocate_id(identity + url, "n", store.nodes);
         node.tag = allocate_tag(node.name, store.nodes, node.id);
-        node.interface_name = next_free_interface(existing, store.nodes, node.id);
+        node.interface_name = next_free_interface(existing, store.nodes, node.id, tun_prefix());
         store.nodes.push_back(std::move(node));
         ++created_nodes;
     }
@@ -1637,7 +1822,7 @@ bool SingboxLinkService::refresh_one(SingboxStore& store, std::size_t index, con
         const auto body = download_(subscription.url, stopping);
         if (stopping && stopping()) return true;
         failure = "subscription did not contain usable proxy data; keeping the previous configuration";
-        const auto fetched = parse_fetched(body);
+        const auto fetched = parse_fetched(body, proxy_core_);
         if (stopping && stopping()) return true;
         auto next = store;
         auto& updated = next.subscriptions[index];
@@ -1736,6 +1921,362 @@ nlohmann::json SingboxLinkService::refresh_subscriptions(const std::string& subs
         throw std::runtime_error("subscription was not found");
     }
     return results;
+}
+
+std::string SingboxLinkService::tun_prefix() const { return tun_prefix_for_core(proxy_core_); }
+
+void SingboxLinkService::set_proxy(std::string core, std::string xray_bin) {
+    // A switch in progress sets the core itself; do not race it.
+    std::unique_lock<std::mutex> lock(mutation_mutex_, std::try_to_lock);
+    if (!lock) return;
+    if (core != "xray") core = "sing-box";
+    proxy_core_ = std::move(core);
+    xray_bin_ = std::move(xray_bin);
+}
+
+void SingboxLinkService::set_core_hooks(CoreProcessFn process, XrayTestFn test, XrayVersionFn version, RamFn ram) {
+    core_process_ = std::move(process);
+    xray_test_ = std::move(test);
+    xray_version_ = std::move(version);
+    ram_ = std::move(ram);
+}
+
+std::string SingboxLinkService::core_error() const {
+    std::lock_guard<std::mutex> lock(status_mutex_);
+    return core_error_;
+}
+
+CoreStartResult SingboxLinkService::ensure_core_running() {
+    CoreStartResult out;
+    // A refresh or a switch may hold the lock for a moment right at boot.
+    std::unique_lock<std::mutex> lock(mutation_mutex_, std::try_to_lock);
+    for (int attempt = 0; !lock && attempt < 60; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        lock = std::unique_lock<std::mutex>(mutation_mutex_, std::try_to_lock);
+    }
+    out.core = proxy_core_;
+    if (!lock) {
+        out.ok = false;
+        out.message = "another sing-box operation is in progress";
+        return out;
+    }
+    const auto set_error = [&](const std::string& text) {
+        std::lock_guard<std::mutex> guard(status_mutex_);
+        core_error_ = text;
+    };
+    if (proxy_core_ != "xray") {
+        set_error({});
+        return out;
+    }
+    try {
+        const auto bin = resolve_xray_binary(xray_bin_);
+        const auto store = read();
+        std::vector<SingboxNode> live;
+        for (const auto& node : store.nodes) {
+            if (!node.unsupported) live.push_back(node);
+        }
+        // Throws when nothing can be carried or a node has no outbound.
+        const auto rendered = render_xray_config(live);
+        const auto body = rendered.dump(2);
+        const auto interfaces = xray_tun_interfaces(rendered);
+        const bool same_file = read_file(xray_config_) == body;
+        const bool alive = core_process_ && core_process_("xray", "alive", bin, xray_config_);
+        const bool up = alive && same_file && interface_wait_ && interface_wait_(interfaces, 1000);
+        if (!up) {
+            if (!same_file) {
+                const auto candidate = candidate_of(xray_config_);
+                write_private(candidate, body);
+                std::string error;
+                const int code = xray_test_ ? xray_test_(bin, candidate, &error) : 0;
+                ::unlink(candidate.c_str());
+                if (code != 0) throw std::runtime_error(error.empty() ? "xray run -test failed" : error);
+                backup_file(xray_config_);
+                write_private(xray_config_, body);
+            }
+            if (!core_process_ || !core_process_("xray", "start", bin, xray_config_)) {
+                throw std::runtime_error("could not start xray");
+            }
+            if (interface_wait_ && !interface_wait_(interfaces, interface_wait_ms_)) {
+                core_process_("xray", "stop", bin, xray_config_);
+                std::string names;
+                for (const auto& name : interfaces) names += (names.empty() ? "" : ", ") + name;
+                throw std::runtime_error("Xray did not bring up " + names + " in " +
+                                         std::to_string(interface_wait_ms_ / 1000) + " s; see " + kXrayLogPath);
+            }
+            out.changed = true;
+        }
+        // One core per router: whatever started sing-box before us is stopped.
+        if (core_process_ && core_process_("sing-box", "alive", "", "")) {
+            core_process_("sing-box", "stop", "", "");
+            out.changed = true;
+        }
+        set_error({});
+    } catch (const std::exception& error) {
+        out.ok = false;
+        out.message = error.what();
+        set_error(out.message);
+        // sing-box stays off: there is no silent swap of the core.
+        try {
+            if (core_process_ && core_process_("sing-box", "alive", "", "")) core_process_("sing-box", "stop", "", "");
+        } catch (const std::exception&) {
+        }
+    }
+    return out;
+}
+
+bool SingboxLinkService::stop_stray_singbox() {
+    std::unique_lock<std::mutex> lock(mutation_mutex_, std::try_to_lock);
+    if (!lock || proxy_core_ != "xray" || !core_process_) return false;
+    if (!core_process_("sing-box", "alive", "", "")) return false;
+    core_process_("sing-box", "stop", "", "");
+    return true;
+}
+
+nlohmann::json SingboxLinkService::core_status() const {
+    nlohmann::json status{{"core", proxy_core_},
+                          {"xray_bin", resolve_xray_binary(xray_bin_)},
+                          {"xray_running", core_process_ ? core_process_("xray", "alive", "", "") : false},
+                          {"singbox_running", core_process_ ? core_process_("sing-box", "alive", "", "") : false},
+                          {"error", core_error()},
+                          {"interfaces", nlohmann::json::array()}};
+    try {
+        for (const auto& node : read().nodes) {
+            status["interfaces"].push_back(
+                {{"name", node.interface_name},
+                 {"tag", node.tag},
+                 {"unsupported", node.unsupported},
+                 {"up", !node.unsupported && interface_wait_ && interface_wait_({node.interface_name}, 0)}});
+        }
+    } catch (const std::exception&) {
+        status["interfaces"] = nlohmann::json::array();
+    }
+    return status;
+}
+
+SingboxApplyResult SingboxLinkService::switch_core(const std::string& requested, const std::string& xray_bin,
+                                                   bool icmptest_groups, const nlohmann::json& keen_config) {
+    const auto lock = begin_mutation();
+    if (requested != "sing-box" && requested != "xray") {
+        throw std::runtime_error("proxy.core must be sing-box or xray");
+    }
+    std::string bin = resolve_xray_binary(xray_bin.empty() ? xray_bin_ : xray_bin);
+    if (requested == "xray") {
+        const auto version = xray_version_ ? xray_version_(bin) : std::string{};
+        if (!xray_version_at_least(version, 26, 10, 17)) {
+            std::string shown = version.empty() ? "version is unknown" : version;
+            const std::string prefix = "Xray ";
+            if (shown.rfind(prefix, 0) == 0) shown.erase(0, prefix.size());
+            throw std::runtime_error("Xray " + shown +
+                                     " is older than 26.10.17. The core was not switched.");
+        }
+    }
+    auto previous = read();
+    auto next = previous;
+    std::vector<InterfaceRename> renames;
+    const auto prefix = tun_prefix_for_core(requested);
+    std::vector<std::string> previous_interfaces;
+    previous_interfaces.reserve(next.nodes.size());
+    for (auto& node : next.nodes) {
+        previous_interfaces.push_back(node.interface_name);
+        // Subscription nodes may carry only the stored outbound; classify that.
+        const auto view = classify_node_for_core(node, requested);
+        if (!view.supported) {
+            node.unsupported = true;
+            node.unsupported_reason = view.reason.empty()
+                                          ? std::string("protocol ") + node.protocol + " is not supported by " +
+                                                (requested == "xray" ? "Xray" : "sing-box")
+                                          : view.reason;
+        } else {
+            node.unsupported = false;
+            node.unsupported_reason.clear();
+            // Without a link the sing-box outbound is the only copy of the node.
+            // Keep it; render_xray_config converts it again.
+            if (requested == "xray" && !node.link.empty()) node.outbound = view.outbound;
+        }
+        if (!node.unsupported) node.interface_name.clear();
+    }
+    const auto existing = requested == "xray" ? nlohmann::json::object() : read_config_object();
+    for (std::size_t i = 0; i < next.nodes.size(); ++i) {
+        auto& node = next.nodes[i];
+        if (node.unsupported) {
+            node.interface_name = previous_interfaces[i];
+            continue;
+        }
+        const auto old_name = previous_interfaces[i];
+        node.interface_name = next_free_interface(existing, next.nodes, node.id, prefix);
+        if (!old_name.empty() && old_name != node.interface_name) {
+            renames.push_back(InterfaceRename{node.tag, old_name, node.interface_name});
+        }
+    }
+    std::vector<SingboxNode> live;
+    for (const auto& node : next.nodes) {
+        if (!node.unsupported) live.push_back(node);
+    }
+    // render_xray_config throws when a carried node has no outbound or nothing
+    // would be carried at all. Nothing has been touched yet.
+    const auto rendered = requested == "xray" ? render_xray_config(live)
+                                              : merge_singbox_config(read_config_object(), live, nullptr);
+    std::vector<std::string> new_interfaces;
+    if (requested == "xray") {
+        new_interfaces = xray_tun_interfaces(rendered);
+        // Everything sing-box serves now stops with it: unsupported nodes and the
+        // user's own TUN inbounds in the sing-box config.
+        std::set<std::string> vanishing(previous_interfaces.begin(), previous_interfaces.end());
+        try {
+            const auto singbox = read_config_object();
+            if (singbox.contains("inbounds") && singbox["inbounds"].is_array()) {
+                for (const auto& inbound : singbox["inbounds"]) {
+                    if (!inbound.is_object() || !inbound.contains("interface_name") ||
+                        !inbound["interface_name"].is_string()) {
+                        continue;
+                    }
+                    vanishing.insert(inbound["interface_name"].get<std::string>());
+                }
+            }
+        } catch (const std::exception&) {
+            // An unreadable sing-box config cannot add interfaces.
+        }
+        for (const auto& name : new_interfaces) vanishing.erase(name);
+        // Carried nodes are renamed in the keen-pbr-sx config in the same save.
+        for (std::size_t i = 0; i < next.nodes.size(); ++i) {
+            if (!next.nodes[i].unsupported) vanishing.erase(previous_interfaces[i]);
+        }
+        vanishing.erase("");
+        const auto blockers = core_switch_blockers(keen_config, vanishing);
+        if (!blockers.empty()) throw std::runtime_error(blockers);
+    }
+    const auto target = requested == "xray" ? xray_config_ : paths_.singbox_config;
+    const auto candidate = candidate_of(target);
+    write_private(candidate, rendered.dump(2));
+    std::string error;
+    int code = 0;
+    if (requested == "xray") code = xray_test_ ? xray_test_(bin, candidate, &error) : 0;
+    else code = check_ ? check_(candidate, &error) : 0;
+    ::unlink(candidate.c_str());
+    if (code != 0) {
+        throw std::runtime_error(error.empty() ? (requested == "xray" ? "xray run -test failed" : "sing-box check failed")
+                                               : error);
+    }
+    const bool had_target = backup_file(target);
+    write_private(target, rendered.dump(2));
+    auto rollback_files = [&] {
+        restore_backup(target, had_target);
+    };
+    auto stop_new = [&] {
+        if (core_process_) core_process_(requested, "stop", bin, target);
+    };
+    if (requested == "xray") {
+        if (!core_process_ || !core_process_("xray", "start", bin, target)) {
+            rollback_files();
+            throw std::runtime_error("could not start xray");
+        }
+        // Make before break: sing-box keeps running until every xrtun is up.
+        if (interface_wait_ && !interface_wait_(new_interfaces, interface_wait_ms_)) {
+            stop_new();
+            rollback_files();
+            std::string names;
+            for (const auto& name : new_interfaces) names += (names.empty() ? "" : ", ") + name;
+            throw std::runtime_error("Xray did not bring up " + names + " in " +
+                                     std::to_string(interface_wait_ms_ / 1000) +
+                                     " s; sing-box was left running. See " + kXrayLogPath);
+        }
+    } else if (!reload_ || !reload_()) {
+        rollback_files();
+        throw std::runtime_error("could not restart sing-box");
+    }
+    KeeneticSyncRequest request;
+    request.nodes = next.nodes;
+    for (const auto& node : previous.nodes) request.owned_tags.push_back(node.tag);
+    request.renames = renames;
+    request.proxy = {{"core", requested}, {"xray_bin", bin}};
+    request.has_proxy = true;
+    try {
+        if (keenetic_) keenetic_(request);
+    } catch (const std::exception&) {
+        stop_new();
+        rollback_files();
+        if (requested == "xray" && reload_) reload_();
+        if (requested == "sing-box" && core_process_) core_process_("xray", "start", bin, xray_config_);
+        throw;
+    }
+    const std::string old_core = requested == "xray" ? "sing-box" : "xray";
+    if (core_process_ && !core_process_(old_core, "stop", bin, xray_config_)) {
+        KeeneticSyncRequest back;
+        back.nodes = previous.nodes;
+        for (const auto& node : previous.nodes) back.owned_tags.push_back(node.tag);
+        back.proxy = {{"core", proxy_core_}, {"xray_bin", xray_bin_}};
+        back.has_proxy = true;
+        try {
+            if (keenetic_) keenetic_(back);
+        } catch (const std::exception&) {
+            // The file and process rollback below still has to run.
+        }
+        stop_new();
+        rollback_files();
+        if (old_core == "sing-box" && reload_) reload_();
+        if (old_core == "xray" && core_process_) core_process_("xray", "start", bin, xray_config_);
+        throw std::runtime_error("could not stop the previous core; the switch was rolled back");
+    }
+    const bool had_store = backup_file(paths_.store);
+    try {
+        write_store(paths_.store, next);
+    } catch (const std::exception&) {
+        restore_backup(paths_.store, had_store);
+        throw;
+    }
+    proxy_core_ = requested;
+    xray_bin_ = bin;
+    {
+        std::lock_guard<std::mutex> guard(status_mutex_);
+        core_error_.clear();
+    }
+    SingboxApplyResult result;
+    result.singbox_checked = true;
+    result.singbox_reloaded = true;
+    result.keenetic_applied = true;
+    if (requested == "xray" && icmptest_groups) {
+        result.warning =
+            "icmptest does not measure an Xray TUN: the stack answers ICMP echo locally. Use urltest.";
+    }
+    result.state = public_state(next);
+    return result;
+}
+
+void apply_interface_renames(nlohmann::json& config, const std::vector<InterfaceRename>& renames) {
+    if (!config.contains("outbounds") || !config["outbounds"].is_array()) return;
+    auto rewrite = [](nlohmann::json& value, const std::string& from, const std::string& to) {
+        if (value.is_string() && value.get<std::string>() == from) value = to;
+    };
+    for (const auto& rename : renames) {
+        if (rename.from.empty() || rename.from == rename.to || rename.from == rename.tag) continue;
+        for (auto& outbound : config["outbounds"]) {
+            if (!outbound.is_object()) continue;
+            const auto type = outbound.value("type", "");
+            if (type != "urltest" && type != "icmptest") continue;
+            if (!outbound.contains("outbound_groups") || !outbound["outbound_groups"].is_array()) continue;
+            for (auto& group : outbound["outbound_groups"]) {
+                if (!group.is_object()) continue;
+                if (group.contains("members") && group["members"].is_array()) {
+                    for (auto& member : group["members"]) {
+                        rewrite(member, rename.from, rename.to);
+                        if (!member.is_object()) continue;
+                        if (member.value("outbound", "") == rename.from) member["outbound"] = rename.to;
+                        if (member.value("interface", "") == rename.from) member["interface"] = rename.to;
+                    }
+                }
+                if (group.contains("outbounds") && group["outbounds"].is_array()) {
+                    for (auto& item : group["outbounds"]) rewrite(item, rename.from, rename.to);
+                }
+                if (group.contains("candidates") && group["candidates"].is_array()) {
+                    for (auto& candidate : group["candidates"]) {
+                        if (candidate.is_object() && candidate.value("outbound", "") == rename.from) {
+                            candidate["outbound"] = rename.to;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 }  // namespace keen_pbr3

@@ -1063,7 +1063,26 @@ export const ruTranslation = {
       newNodes_other: "новые узлы в подписке: {{count}}",
       alreadyAdded: "уже добавлен",
       missing: "нет в подписке",
-      unsupportedCore: "узел не поддерживается ядром",
+      unsupportedCore: "не поддерживается",
+      core: "Ядро прокси",
+      coreHint:
+        "Одно ядро на весь роутер. Интерфейсы Xray — xrtun, xrtun2 и далее. sing-box остаётся на sbtun. Переключение заново записывает каналы interface и тех участников групп, где было старое имя TUN.",
+      xrayBin: "Бинарник Xray",
+      xrayBinHint: "Пусто — поиск в /opt/bin/xray, /opt/usr/bin/xray, затем в PATH.",
+      xrayVersion: "Обнаружена версия: {{version}}",
+      xrayVersionUnknown: "Версия Xray не обнаружена.",
+      switchCore: "Переключить ядро",
+      coreSaved: "Ядро переключено.",
+      ramWarning:
+        "На роутере {{mb}} МиБ памяти. Xray спокойнее от 384 МиБ. Переключение всё равно разрешено.",
+      versionTooOld:
+        "Xray {{version}} старше 26.10.17. В той сборке TUN ещё был на gVisor. Ядро не переключено.",
+      icmptestXray:
+        "icmptest не измеряет TUN Xray: стек сам отвечает на ICMP echo. Используйте urltest.",
+      startFailed: "Не удалось запустить Xray. Предыдущее ядро на месте.",
+      testFailed: "xray run -test не прошёл. Ядро не переключено.",
+      unsupportedProtocol: "{{protocol}} не поддерживается ядром {{core}}",
+      unsupportedTransport: "Транспорт {{transport}} не поддерживается Xray",
       sourceLink: "ссылка",
       unnamed: "без имени",
       lastRefresh: "Последнее успешное обновление",

@@ -230,6 +230,11 @@ private:
   void handle_sigusr1();
   void schedule_sigusr1_runtime_refresh();
   void handle_sighup();
+  // proxy.core=xray: regenerate xray.json, start Xray, wait for the xrtun
+  // interfaces and keep sing-box off. Runs on an executor thread, not the loop.
+  // proxy.core=sing-box: does nothing. Never throws.
+  void ensure_proxy_core(const char *reason);
+  void guard_stray_singbox();
   void handle_interface_monitor_events(uint32_t events);
   void reconnect_interface_monitor();
   void register_interface_monitor_fd();
@@ -643,6 +648,8 @@ IcmpTester icmp_tester_;
   std::atomic<std::size_t> routing_tests_inflight_{0};
   SingboxLinkService singbox_links_{make_singbox_link_service()};
   std::atomic<bool> subscription_refresh_queued_{false};
+  std::atomic<bool> core_switch_inflight_{false};
+  std::atomic<int> core_guard_ticks_{0};
   BlockingExecutor subscription_executor_{1, 1};
 
 #ifdef WITH_API

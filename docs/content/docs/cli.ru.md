@@ -40,6 +40,10 @@ Commands:
       --dscp <0-63>                  Packet DSCP (default: 0)
   resolver dnsmasq print-config      Print the dnsmasq config generated from dns.rules/dns.fallback (cached lists only; used as dnsmasq conf-script, always exits 0)
   resolver dnsmasq detect [--json]   List dnsmasq instances, their DNS endpoints and which one keen-pbr-sx uses
+  core [status [--json]]             Show the proxy core (sing-box or Xray), its process and TUN interfaces
+  core <sing-box|xray> [--xray-bin PATH]
+                                     Switch the proxy core through the running daemon (root only);
+                                     same checks and rollback as POST /api/sing-box/core
   hash-password [--update]           Generate an authentication password hash; --update writes config.json
 ```
 
@@ -94,6 +98,8 @@ ip6tables -t raw -S
 | `status` | Показать состояние службы, outbound, маршрутизации, firewall и проверок ядра, затем список проблем, как на главной странице веб-интерфейса, и выйти. Код выхода 1, если какая-то проверка не прошла или есть проблема уровня «ошибка». |
 | `download [--reload]` | Загрузить все списки с URL в кэш и выйти. С `--reload` сервис сразу применяет списки, которые изменились. |
 | `resolver dnsmasq print-config` | Вывести конфигурацию dnsmasq для отдельных DNS-серверов списков. |
+| `core [status [--json]]` | Показать ядро прокси, запущен ли его процесс и состояние TUN-интерфейсов. Код выхода 1, если активное ядро не запущено или не стартовало. |
+| `core <sing-box\|xray> [--xray-bin PATH]` | Переключить ядро прокси через запущенный сервис. См. [`core`](#core). |
 | `hash-password [--update]` | Создать хеш пароля для входа в веб-интерфейс и API. |
 | `resolver dnsmasq detect [--json]` | Показать экземпляры dnsmasq, их DNS-адреса и экземпляр, который использует keen-pbr-sx. |
 | `test-routing <ip-or-domain> [параметры пакета]` | Сравнить ожидаемую и фактическую маршрутизацию для данного IP или домена. Проверку выполняет служба, так же как проверку маршрутизации в веб-интерфейсе. |
@@ -149,6 +155,24 @@ keen-pbr-sx hash-password --update
 ```
 
 Без `--update` команда печатает `Password hash: <хеш>`, который вы вставляете в `api.authentication.password_hash` сами. С `--update` она записывает в `config.json` `api.enabled: true`, `api.authentication.enabled: true` и хеш. После этого перезапустите сервис: `Restart the keen-pbr-sx service for authentication changes to take effect.`
+
+### `core` {#core}
+
+Показывает и переключает ядро прокси: sing-box (по умолчанию) или Xray. Запускайте от root на роутере при работающем сервисе.
+
+```bash
+keen-pbr-sx core                      # то же, что core status
+keen-pbr-sx core status --json
+keen-pbr-sx core xray                 # переключить на Xray
+keen-pbr-sx core xray --xray-bin /opt/sbin/xray
+keen-pbr-sx core sing-box             # вернуть sing-box
+```
+
+`status` печатает активное ядро, запущены ли процессы sing-box и Xray, TUN-интерфейс каждого узла (`up`, `DOWN` или `unsupported` для узла, который активное ядро не поддерживает) и ошибку запуска, если она есть. Код выхода 0, если активное ядро запущено и ошибки нет, иначе 1. `--json` выводит те же данные в JSON.
+
+`xray` и `sing-box` выполняют то же переключение, что `POST /api/sing-box/core` в веб-интерфейсе: проверка версии Xray, проверка конфига, проверка правил маршрутизации и DNS-detour, которые остались бы на исчезающем интерфейсе, запуск нового ядра до остановки старого и откат при любой ошибке. Команда печатает новое ядро и интерфейсы и завершается с кодом 0, либо печатает ошибку и завершается с кодом 1. `--xray-bin` задаёт `proxy.xray_bin` для этого переключения.
+
+Команда общается с сервисом через управляющий сокет, доступный только root (права 0600, подключиться может только uid 0). REST API и его аутентификация не используются и не ослабляются. Само переключение сохраняет конфиг через подсистему API, поэтому нужны `api.enabled` и запуск без `--no-api`; иначе команда завершится ошибкой `api_unavailable`. Что сервис делает при старте, описано в [Xray-ядре]({{< relref "/docs/developer/xray-core" >}}).
 
 ### `resolver dnsmasq detect` {#resolver-dnsmasq-detect}
 

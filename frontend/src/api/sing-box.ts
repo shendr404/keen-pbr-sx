@@ -52,6 +52,11 @@ export type SingboxState = {
   singbox_checked?: boolean
   singbox_reloaded?: boolean
   keenetic_applied?: boolean
+  core?: string
+  xray_bin?: string
+  xray_version?: string
+  ram_kib?: number
+  ram_warning?: boolean
 }
 
 type Envelope = { data: SingboxState }

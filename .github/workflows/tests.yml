@@ -50,5 +50,24 @@ jobs:
             zlib1g-dev \
             busybox
 
+      # The generated xray.json must pass the real `xray run -test -format json`.
+      # tests/test_xray_real.cpp reads KEEN_PBR_XRAY_BIN and, with
+      # KEEN_PBR_REQUIRE_XRAY=1, fails if it is missing. Pinned release and checksum.
+      - name: Download official Xray release
+        env:
+          XRAY_VERSION: v26.10.31
+          XRAY_SHA256: e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/xray"
+          curl -fsSL -o "$RUNNER_TEMP/xray/xray.zip" \
+            "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
+          echo "${XRAY_SHA256}  $RUNNER_TEMP/xray/xray.zip" | sha256sum -c -
+          unzip -q -o "$RUNNER_TEMP/xray/xray.zip" -d "$RUNNER_TEMP/xray"
+          chmod +x "$RUNNER_TEMP/xray/xray"
+          "$RUNNER_TEMP/xray/xray" version
+          echo "KEEN_PBR_XRAY_BIN=$RUNNER_TEMP/xray/xray" >> "$GITHUB_ENV"
+          echo "KEEN_PBR_REQUIRE_XRAY=1" >> "$GITHUB_ENV"
+
       - name: Run doctest
         run: make test

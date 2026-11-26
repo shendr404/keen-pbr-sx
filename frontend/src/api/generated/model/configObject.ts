@@ -14,6 +14,7 @@ import type { InterceptConfig } from './interceptConfig';
 import type { IprouteConfig } from './iprouteConfig';
 import type { ListsAutoupdateConfig } from './listsAutoupdateConfig';
 import type { Outbound } from './outbound';
+import type { ProxyConfig } from './proxyConfig';
 import type { RouteConfig } from './routeConfig';
 
 /**
@@ -42,4 +43,6 @@ export interface ConfigObject {
   iproute?: IprouteConfig;
   lists_autoupdate?: ListsAutoupdateConfig;
   intercept?: InterceptConfig;
+  /** Which proxy core owns the per-node TUN interfaces. */
+  proxy?: ProxyConfig;
 }

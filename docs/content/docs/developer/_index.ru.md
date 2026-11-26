@@ -7,4 +7,5 @@ weight: 9
 
 {{< cards cols="1" >}}
   {{< card link="build-from-source" title="Сборка из исходного кода" >}}
+  {{< card link="xray-core" title="Выбор ядра Xray" >}}
 {{< /cards >}}

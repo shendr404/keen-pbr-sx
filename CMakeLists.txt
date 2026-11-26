@@ -295,6 +295,7 @@ set(SOURCES
   src/lists/list_set_usage.cpp
   src/lists/domain_index.cpp
   src/cache/cache_manager.cpp
+  src/cmd/core_cmd.cpp
   src/cmd/dnsmasq_cmd.cpp
   src/cmd/resolver_config.cpp
   src/cmd/status.cpp
@@ -317,6 +318,7 @@ set(SOURCES
   src/singbox/link_parser.cpp
   src/singbox/link_store.cpp
   src/singbox/link_platform.cpp
+  src/singbox/xray_config.cpp
   src/health/health_issues.cpp
   src/health/service_health.cpp
   src/health/runtime_interface_inventory.cpp

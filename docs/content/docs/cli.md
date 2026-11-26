@@ -40,6 +40,10 @@ Commands:
       --dscp <0-63>                  Packet DSCP (default: 0)
   resolver dnsmasq print-config      Print the dnsmasq config generated from dns.rules/dns.fallback (cached lists only; used as dnsmasq conf-script, always exits 0)
   resolver dnsmasq detect [--json]   List dnsmasq instances, their DNS endpoints and which one keen-pbr-sx uses
+  core [status [--json]]             Show the proxy core (sing-box or Xray), its process and TUN interfaces
+  core <sing-box|xray> [--xray-bin PATH]
+                                     Switch the proxy core through the running daemon (root only);
+                                     same checks and rollback as POST /api/sing-box/core
   hash-password [--update]           Generate an authentication password hash; --update writes config.json
 ```
 
@@ -94,6 +98,8 @@ ip6tables -t raw -S
 | `status` | Show service, outbound, routing, firewall and kernel health, then the issue list the web UI overview shows, and exit. Exits with 1 when any check failed or any issue is an error. |
 | `download [--reload]` | Download all URL-backed lists into the cache and exit. With `--reload` the service applies the lists that changed right away. |
 | `resolver dnsmasq print-config` | Print the dnsmasq configuration for per-list DNS servers. |
+| `core [status [--json]]` | Show the proxy core, whether its process is running and the state of the TUN interfaces. Exits with 1 when the active core is not running or its startup failed. |
+| `core <sing-box\|xray> [--xray-bin PATH]` | Switch the proxy core through the running service. See [`core`](#core). |
 | `hash-password [--update]` | Create a password hash for logging in to the web UI and API. |
 | `resolver dnsmasq detect [--json]` | List dnsmasq instances, their DNS endpoints and the instance keen-pbr-sx uses. |
 | `test-routing <ip-or-domain> [packet options]` | Compare expected and actual routing for the given IP or domain. The daemon runs the check, the same way as the routing test in the web UI. |
@@ -149,6 +155,24 @@ keen-pbr-sx hash-password --update
 ```
 
 Without `--update` the command prints `Password hash: <hash>`, which you paste into `api.authentication.password_hash` yourself. With `--update` it writes `api.enabled: true`, `api.authentication.enabled: true` and the hash into `config.json`. Then restart the service: `Restart the keen-pbr-sx service for authentication changes to take effect.`
+
+### `core` {#core}
+
+Shows and switches the proxy core: sing-box (default) or Xray. Run it as root on the router, with the service running.
+
+```bash
+keen-pbr-sx core                      # same as: core status
+keen-pbr-sx core status --json
+keen-pbr-sx core xray                 # switch to Xray
+keen-pbr-sx core xray --xray-bin /opt/sbin/xray
+keen-pbr-sx core sing-box             # switch back
+```
+
+`status` prints the active core, whether the sing-box and Xray processes are running, each node's TUN interface (`up`, `DOWN`, or `unsupported` for a node the active core cannot carry) and the startup error, if there is one. The exit code is 0 when the active core is running and there is no error, otherwise 1. `--json` prints the same data as JSON.
+
+`xray` and `sing-box` run the same switch as `POST /api/sing-box/core` in the web UI: the Xray version check, the config test, the check of route rules and DNS detours that would be left on an interface that goes away, starting the new core before stopping the old one, and rollback if anything fails. The command prints the new core and the interfaces and exits with 0, or prints the error and exits with 1. `--xray-bin` sets `proxy.xray_bin` for that switch.
+
+The command talks to the service over the root-only control socket (mode 0600, only uid 0 may connect). The REST API and its authentication are not used and are not weakened. The switch itself saves the config through the API subsystem, so `api.enabled` must be on and the service must not run with `--no-api`; otherwise the command fails with `api_unavailable`. See [Xray core]({{< relref "/docs/developer/xray-core" >}}) for what the service does at start.
 
 ### `resolver dnsmasq detect` {#resolver-dnsmasq-detect}
 

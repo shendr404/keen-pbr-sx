@@ -161,6 +161,8 @@ void sync_keenetic_outbounds(ApiContext& ctx, const KeeneticSyncRequest& request
         });
     }
     doc["outbounds"] = std::move(kept);
+    apply_interface_renames(doc, request.renames);
+    if (request.has_proxy) doc["proxy"] = request.proxy;
     const auto dumped = doc.dump(2);
     Config updated = parse_config(dumped);
     ctx.validate_candidate_config_fn(updated);
@@ -172,9 +174,54 @@ void sync_keenetic_outbounds(ApiContext& ctx, const KeeneticSyncRequest& request
 
 }  // namespace
 
+nlohmann::json switch_proxy_core(ApiContext& ctx, SingboxLinkService& service, const std::string& core,
+                                 const std::string& xray_bin) {
+    if (!ctx.get_visible_config_fn) throw std::runtime_error("config apply is unavailable");
+    const auto config = ctx.get_visible_config_fn();
+    std::string current_core = "sing-box";
+    std::string current_bin;
+    if (config.proxy) {
+        if (config.proxy->core && !config.proxy->core->empty()) current_core = *config.proxy->core;
+        if (config.proxy->xray_bin) current_bin = *config.proxy->xray_bin;
+    }
+    service.set_proxy(current_core, current_bin);
+    bool icmptest = false;
+    if (config.outbounds) {
+        for (const auto& outbound : *config.outbounds) {
+            if (outbound.type == OutboundType::ICMPTEST) icmptest = true;
+        }
+    }
+    nlohmann::json keen_config = nlohmann::json::object();
+    api::to_json(keen_config, config);
+    return nlohmann::json::parse(result_json(service.switch_core(core, xray_bin, icmptest, keen_config)));
+}
+
 void register_singbox_handler(ApiServer& server, ApiContext& ctx, SingboxLinkService& service) {
+    auto apply_proxy = [&ctx, &service] {
+        if (!ctx.get_visible_config_fn) return;
+        const auto config = ctx.get_visible_config_fn();
+        std::string core = "sing-box";
+        std::string bin;
+        if (config.proxy) {
+            if (config.proxy->core && !config.proxy->core->empty()) core = *config.proxy->core;
+            if (config.proxy->xray_bin) bin = *config.proxy->xray_bin;
+        }
+        service.set_proxy(core, bin);
+    };
     service.set_keenetic_callback([&ctx](const KeeneticSyncRequest& request) {
         sync_keenetic_outbounds(ctx, request);
+    });
+    server.post("/api/sing-box/core", [&service, &ctx](const std::string& body) {
+        try {
+            const auto json = require_object(body);
+            return switch_proxy_core(ctx, service, field(json, "core"), field(json, "xray_bin")).dump();
+        } catch (const nlohmann::json::exception&) {
+            throw ApiError("invalid JSON", 400);
+        } catch (const SingboxBusy& error) {
+            throw ApiError(error.what(), 409);
+        } catch (const std::runtime_error& error) {
+            throw ApiError(error.what(), 400);
+        }
     });
 
     server.post("/api/sing-box/preview", [&service](const std::string& body) {
@@ -191,9 +238,13 @@ void register_singbox_handler(ApiServer& server, ApiContext& ctx, SingboxLinkSer
             throw ApiError(error.what(), 400);
         }
     });
-    server.get("/api/sing-box/profiles", [&service]() { return service.state().dump(); });
-    server.post("/api/sing-box/nodes", [&service](const std::string& body) {
+    server.get("/api/sing-box/profiles", [&service, apply_proxy]() {
+        apply_proxy();
+        return service.state().dump();
+    });
+    server.post("/api/sing-box/nodes", [&service, apply_proxy](const std::string& body) {
         try {
+            apply_proxy();
             const auto json = require_object(body);
             return result_json(service.add_links(link_lines(json), tun_options(json)));
         } catch (const nlohmann::json::exception&) {
@@ -225,8 +276,9 @@ void register_singbox_handler(ApiServer& server, ApiContext& ctx, SingboxLinkSer
             throw ApiError(error.what(), 400);
         }
     });
-    server.post("/api/sing-box/subscriptions", [&service](const std::string& body) {
+    server.post("/api/sing-box/subscriptions", [&service, apply_proxy](const std::string& body) {
         try {
+            apply_proxy();
             const auto json = require_object(body);
             return result_json(service.save_subscription(field(json, "url"), number_field(json, "interval_hours", 0),
                                                          string_list(json, "selected"), tun_options(json),
@@ -263,8 +315,9 @@ void register_singbox_handler(ApiServer& server, ApiContext& ctx, SingboxLinkSer
             throw ApiError(error.what(), 400);
         }
     });
-    server.post("/api/sing-box/subscriptions/refresh", [&service, &ctx](const std::string& body) {
+    server.post("/api/sing-box/subscriptions/refresh", [&service, &ctx, apply_proxy](const std::string& body) {
         try {
+            apply_proxy();
             const auto json = require_object(body);
             auto id = field(json, "subscription_id");
             if (id.empty()) id = field(json, "profile_id");

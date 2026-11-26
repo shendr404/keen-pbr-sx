@@ -1028,7 +1028,26 @@ export const enTranslation = {
       newNodes_other: "new nodes in the subscription: {{count}}",
       alreadyAdded: "already added",
       missing: "not in the subscription",
-      unsupportedCore: "node is not supported by this sing-box",
+      unsupportedCore: "unsupported",
+      core: "Proxy core",
+      coreHint:
+        "One core for the whole router. Xray interfaces are xrtun, xrtun2, and so on. sing-box keeps sbtun. Switching rewrites the interface outbounds and any group member that stored the old TUN name.",
+      xrayBin: "Xray binary",
+      xrayBinHint: "Empty searches /opt/bin/xray, /opt/usr/bin/xray, then PATH.",
+      xrayVersion: "Detected version: {{version}}",
+      xrayVersionUnknown: "Xray version was not detected.",
+      switchCore: "Switch core",
+      coreSaved: "Core switched.",
+      ramWarning:
+        "This router reports {{mb}} MiB of RAM. Xray is more comfortable from 384 MiB. The switch is still allowed.",
+      versionTooOld:
+        "Xray {{version}} is older than 26.10.17. TUN in that build still used gVisor. The core was not switched.",
+      icmptestXray:
+        "icmptest does not measure an Xray TUN: the stack answers ICMP echo locally. Use urltest.",
+      startFailed: "Could not start Xray. The previous core is still in place.",
+      testFailed: "xray run -test failed. The core was not switched.",
+      unsupportedProtocol: "{{protocol}} is not supported by {{core}}",
+      unsupportedTransport: "Transport {{transport}} is not supported by Xray",
       sourceLink: "link",
       unnamed: "unnamed",
       lastRefresh: "Last successful refresh",

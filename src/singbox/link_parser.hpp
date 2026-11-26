@@ -70,6 +70,9 @@ struct SubscriptionParseInfo {
 struct SubscriptionNode {
     ParsedProxyLink link;
     std::string id;
+    // The original share link when the subscription is a link list. Empty for
+    // sing-box or Clash JSON. Kept so the node can be rebuilt for either core.
+    std::string raw;
 };
 
 // Throws std::runtime_error with a message that does not contain the secret.
@@ -77,8 +80,11 @@ ParsedProxyLink parse_proxy_link(const std::string& link);
 
 // base64 list, plain list, sing-box JSON, or Clash JSON. Unsupported lines are
 // counted and skipped. Throws if nothing usable is found.
+// core is "sing-box" (default) or "xray". Xray accepts VLESS only, including
+// xhttp and VLESS Encryption. Other protocols are skipped and name Xray.
 std::vector<SubscriptionNode> parse_subscription(const std::string& body,
-                                                 SubscriptionParseInfo* info);
+                                                 SubscriptionParseInfo* info,
+                                                 const std::string& core = "sing-box");
 
 std::string proxy_node_id(const ParsedProxyLink& link);
 

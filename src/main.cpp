@@ -19,6 +19,7 @@
 #include "config/config.hpp"
 #include "config/config_writer.hpp"
 #include "auth/password.hpp"
+#include "cmd/core_cmd.hpp"
 #include "cmd/dnsmasq_cmd.hpp"
 #include "cmd/resolver_config.hpp"
 #include "cmd/status.hpp"
@@ -75,6 +76,8 @@ struct CliOptions {
   bool resolver_config_hash{false};
   bool run_status{false};
   bool refresh_subscriptions{false};
+  bool run_core{false};
+  keen_pbr3::CoreCommand core_command;
   std::string subscription_id;
   bool run_resolver_detect{false};
   bool resolver_usage_error{false};
@@ -120,6 +123,10 @@ void print_usage(const char *argv0) {
             << "  download                           Download all configured "
                "lists to cache and exit\n"
             << "  subscriptions refresh [--all|<id>]  Refresh sing-box subscriptions via the daemon\n"
+            << "  core [status [--json]]             Show the proxy core (sing-box or Xray), its process and TUN interfaces\n"
+            << "  core <sing-box|xray> [--xray-bin PATH]\n"
+            << "                                     Switch the proxy core through the running daemon (root only);\n"
+               "                                     same checks and rollback as POST /api/sing-box/core\n"
             << "  test-routing <ip-or-domain> [packet options]\n"
             << "                                     Test expected vs actual "
                "routing for an IP or domain\n"
@@ -243,6 +250,17 @@ CliOptions parse_args(int argc, char *argv[]) {
           std::exit(64);
         }
       }
+      break;
+    } else if (std::strcmp(argv[i], "core") == 0) {
+      std::vector<std::string> rest;
+      for (++i; i < argc; ++i) rest.emplace_back(argv[i]);
+      try {
+        opts.core_command = keen_pbr3::parse_core_command(rest);
+      } catch (const keen_pbr3::CoreUsageError &error) {
+        std::cerr << "Error: " << error.what() << "\n" << keen_pbr3::core_usage();
+        std::exit(64);
+      }
+      opts.run_core = true;
       break;
     } else if (std::strcmp(argv[i], "--reload") == 0) {
       opts.download_reload = true;
@@ -453,7 +471,7 @@ int main(int argc, char *argv[]) {
         !opts.resolver_config_hash && !opts.run_service && !opts.run_status &&
         !opts.run_test_routing && !opts.hash_password &&
         !opts.run_resolver_detect && !opts.resolver_usage_error &&
-        !opts.refresh_subscriptions) {
+        !opts.refresh_subscriptions && !opts.run_core) {
       print_usage(argv[0]);
       return 0;
     }
@@ -509,6 +527,47 @@ int main(int argc, char *argv[]) {
     // Deprecated no-op stub: old installs may still call it.
     if (opts.resolver_config_hash) {
       return 0;
+    }
+
+    if (opts.run_core) {
+      // Root-only control socket, the same one `status` uses. The daemon runs
+      // the switch; the REST API and its authentication are not involved.
+      const bool switching = opts.core_command.action == keen_pbr3::CoreCommand::Action::Switch;
+      nlohmann::json fields = nlohmann::json::object();
+      if (switching) {
+        fields["core"] = opts.core_command.core;
+        fields["xray_bin"] = opts.core_command.xray_bin;
+      }
+      // A switch waits for the TUN interfaces and saves the config; do not
+      // retry a timed-out mutation.
+      const auto response = switching
+          ? keen_pbr3::ipc::request_control(
+                KEEN_PBR_CONTROL_SOCKET,
+                {{"protocol_version", keen_pbr3::ipc::kControlProtocolVersion},
+                 {"request_id", "cli-core-" + std::to_string(getpid())},
+                 {"operation", "core-switch"},
+                 {"core", fields.at("core")},
+                 {"xray_bin", fields.at("xray_bin")}},
+                1000, 180000)
+          : request_control_state("core-status", fields, 15000);
+      if (!response.value("ok", false)) {
+        const auto &error = response.value("error", nlohmann::json::object());
+        std::cerr << "keen-pbr-sx core: " << error.value("code", "daemon_error") << ": "
+                  << error.value("message", "control request failed") << '\n';
+        return 1;
+      }
+      const auto &result = response.at("result");
+      if (switching) {
+        std::cout << keen_pbr3::format_core_switch(result);
+        return 0;
+      }
+      if (opts.core_command.json) std::cout << result.dump(2) << '\n';
+      else std::cout << keen_pbr3::format_core_status(result);
+      // 0: the core is running and no startup error. 1: error, or the active core is down.
+      const auto core = result.value("core", "sing-box");
+      const bool running = core == "xray" ? result.value("xray_running", false)
+                                          : result.value("singbox_running", false);
+      return result.value("error", "").empty() && running ? 0 : 1;
     }
 
     if (opts.refresh_subscriptions) {
