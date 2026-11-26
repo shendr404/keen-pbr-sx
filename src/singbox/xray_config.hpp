@@ -35,7 +35,24 @@ struct XrayLinkView {
 
 XrayLinkView classify_link_for_core(const std::string& link, const std::string& core);
 
+// Subscription nodes may have no link, only the stored outbound. The link wins
+// when present. Otherwise a sing-box outbound ("type") is converted, and an
+// outbound that is already in Xray form ("protocol") is used as is.
+XrayLinkView classify_node_for_core(const SingboxNode& node, const std::string& core);
+
+// sing-box 1.14 VLESS outbound -> Xray VLESS outbound with streamSettings, no tag.
+// Throws std::runtime_error naming Xray for other protocols and transports.
+nlohmann::json singbox_outbound_to_xray(const nlohmann::json& outbound);
+
+// Xray writes warnings and errors here; it is truncated on each start.
+constexpr const char* kXrayLogPath = "/tmp/keen-pbr-sx-xray.log";
+
 // One TUN inbound per supported node. autoSystemRoutingTable stays off.
-nlohmann::json render_xray_config(const std::vector<SingboxNode>& nodes);
+// Throws when a node that should be carried has no outbound, and, unless
+// allow_empty is set, when the result has no TUN inbound at all.
+nlohmann::json render_xray_config(const std::vector<SingboxNode>& nodes, bool allow_empty = false);
+
+// TUN interface names that the rendered config creates.
+std::vector<std::string> xray_tun_interfaces(const nlohmann::json& config);
 
 }  // namespace keen_pbr3

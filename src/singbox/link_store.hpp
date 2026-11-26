@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -134,6 +135,8 @@ using CoreProcessFn = std::function<bool(const std::string& core, const std::str
 using XrayTestFn = std::function<int(const std::string& bin, const std::string& config_path, std::string* error)>;
 using XrayVersionFn = std::function<std::string(const std::string& bin)>;
 using RamFn = std::function<long()>;
+// True once every named interface exists and is up. Gives up after timeout_ms.
+using InterfaceWaitFn = std::function<bool(const std::vector<std::string>& names, int timeout_ms)>;
 
 class SingboxBusy : public std::runtime_error {
 public:
@@ -145,14 +148,23 @@ public:
     SingboxLinkService(SingboxPaths paths, SingboxCheck check, KeeneticSyncFn keenetic,
                        SingboxReloadFn reload, SubscriptionDownloadFn download = {},
                        SubscriptionClock clock = {}, CoreProcessFn process = {}, XrayTestFn test = {},
-                       XrayVersionFn version = {}, RamFn ram = {});
+                       XrayVersionFn version = {}, RamFn ram = {}, InterfaceWaitFn wait = {});
 
     void set_keenetic_callback(KeeneticSyncFn keenetic) { keenetic_ = std::move(keenetic); }
     void set_proxy(std::string core, std::string xray_bin);
     void set_core_hooks(CoreProcessFn process, XrayTestFn test, XrayVersionFn version, RamFn ram);
+    void set_interface_wait(InterfaceWaitFn wait, int timeout_ms = 20000) {
+        interface_wait_ = std::move(wait);
+        interface_wait_ms_ = timeout_ms;
+    }
     // One core for the router. Recreates TUN names (sbtun* or xrtun*) and
     // asks keenetic sync to retarget interface outbounds and group members.
-    SingboxApplyResult switch_core(const std::string& core, const std::string& xray_bin, bool icmptest_groups);
+    // keen_config is the current keen-pbr-sx config. Switching to Xray is
+    // refused when a route rule or DNS detour would be left on a TUN that stops
+    // with sing-box. Xray starts first; sing-box stops only after the xrtun
+    // interfaces are up.
+    SingboxApplyResult switch_core(const std::string& core, const std::string& xray_bin, bool icmptest_groups,
+                                   const nlohmann::json& keen_config = nlohmann::json());
     nlohmann::json preview(const std::string& link) const;
     // Downloads a subscription and returns nodes plus skipped lines. Does not save.
     nlohmann::json preview_subscription(const std::string& url_or_id) const;
@@ -218,6 +230,8 @@ private:
     XrayTestFn xray_test_;
     mutable XrayVersionFn xray_version_;
     mutable RamFn ram_;
+    InterfaceWaitFn interface_wait_;
+    int interface_wait_ms_{20000};
     std::mutex mutation_mutex_;
     mutable std::mutex status_mutex_;
     std::map<std::string, RefreshStatus> refresh_status_;
@@ -229,5 +243,9 @@ bool safe_interface_name(const std::string& name);
 std::string format_singbox_check_error(int exit_code, bool timed_out, const std::string& output);
 // Empty when tag is unused. Otherwise names the route rules and urltest/icmptest groups.
 std::string outbound_reference_message(const nlohmann::json& config, const std::string& tag);
+// Empty when nothing in use depends on the vanishing TUN interfaces. Otherwise
+// names the route rules and DNS servers that would lose their path. A
+// urltest/icmptest group counts as lost only when every member is lost.
+std::string core_switch_blockers(const nlohmann::json& config, const std::set<std::string>& vanishing);
 
 }  // namespace keen_pbr3

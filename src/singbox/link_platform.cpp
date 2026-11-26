@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <thread>
+#include <vector>
 
 namespace keen_pbr3 {
 namespace {
@@ -51,10 +53,43 @@ bool xray_process(const std::string& action, const std::string& bin, const std::
         return result.exit_code == 0 || result.exit_code == 1;
     }
     safe_exec_capture_with_timeouts({ssd, "-K", "-p", pid}, safe_exec_timeouts(), true, 0, true, false);
+    // xray.json sends warnings and errors to this file. Start each run with an
+    // empty one so it stays small on tmpfs.
+    { std::ofstream truncate(kXrayLogPath, std::ios::trunc); }
     const auto result = safe_exec_capture_with_timeouts(
         {ssd, "-S", "-b", "-m", "-p", pid, "-x", bin, "--", "run", "-format", "json", "-c", config},
         safe_exec_timeouts(), true, 0, true, false);
     return result.exit_code == 0;
+}
+
+bool interface_up(const std::string& name) {
+    if (name.empty() || name.find('/') != std::string::npos) return false;
+    std::ifstream input("/sys/class/net/" + name + "/flags");
+    if (!input) return false;
+    std::string text;
+    input >> text;
+    if (text.empty()) return false;
+    try {
+        return (std::stoul(text, nullptr, 0) & 0x1U) != 0;  // IFF_UP
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool wait_interfaces_up(const std::vector<std::string>& names, int timeout_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        bool all = true;
+        for (const auto& name : names) {
+            if (!interface_up(name)) {
+                all = false;
+                break;
+            }
+        }
+        if (all) return true;
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
 }
 
 std::string read_meminfo() {
@@ -110,7 +145,7 @@ SingboxLinkService make_singbox_link_service() {
                 {bin, "version"}, safe_exec_timeouts(), false, std::size_t{2} * 1024U, true, true);
             return result.stdout_output;
         },
-        [] { return ram_total_kib(read_meminfo()); });
+        [] { return ram_total_kib(read_meminfo()); }, wait_interfaces_up);
 }
 
 }  // namespace keen_pbr3

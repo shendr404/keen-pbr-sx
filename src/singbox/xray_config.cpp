@@ -221,6 +221,132 @@ XrayLinkView parse_vless_for_xray(const std::string& rest) {
     return view;
 }
 
+std::string json_string(const nlohmann::json& object, const char* key) {
+    if (!object.is_object() || !object.contains(key) || !object.at(key).is_string()) return {};
+    return object.at(key).get<std::string>();
+}
+
+int json_port(const nlohmann::json& object, const char* key) {
+    if (!object.is_object() || !object.contains(key)) return 0;
+    const auto& value = object.at(key);
+    if (value.is_number_integer()) {
+        const auto port = value.get<long long>();
+        return port > 0 && port <= 65535 ? static_cast<int>(port) : 0;
+    }
+    if (value.is_string()) return parse_port(value.get<std::string>());
+    return 0;
+}
+
+bool json_enabled(const nlohmann::json& object) {
+    return object.is_object() && object.contains("enabled") && object.at("enabled").is_boolean() &&
+           object.at("enabled").get<bool>();
+}
+
+// sing-box keeps HTTP headers as {"Host": "a"} or {"Host": ["a", "b"]}; host lists as a string or array.
+std::string first_text(const nlohmann::json& value) {
+    if (value.is_string()) return value.get<std::string>();
+    if (value.is_array()) {
+        for (const auto& item : value) {
+            if (item.is_string() && !item.get<std::string>().empty()) return item.get<std::string>();
+        }
+    }
+    return {};
+}
+
+std::string header_host(const nlohmann::json& transport) {
+    if (!transport.contains("headers") || !transport.at("headers").is_object()) return {};
+    for (const auto& item : transport.at("headers").items()) {
+        auto key = item.key();
+        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (key == "host") return first_text(item.value());
+    }
+    return {};
+}
+
+nlohmann::json xray_stream_from_singbox(const nlohmann::json& outbound, const std::string& server) {
+    std::string network = "tcp";
+    nlohmann::json stream = nlohmann::json::object();
+    if (outbound.contains("transport") && outbound.at("transport").is_object()) {
+        const auto& transport = outbound.at("transport");
+        const auto type = json_string(transport, "type");
+        const auto path = json_string(transport, "path");
+        if (type.empty() || type == "tcp") {
+            network = "tcp";
+        } else if (type == "ws") {
+            network = "ws";
+            nlohmann::json ws = nlohmann::json::object();
+            if (!path.empty()) ws["path"] = path;
+            const auto host = header_host(transport);
+            if (!host.empty()) ws["headers"] = {{"Host", host}};
+            if (!ws.empty()) stream["wsSettings"] = std::move(ws);
+        } else if (type == "grpc") {
+            network = "grpc";
+            const auto service = json_string(transport, "service_name");
+            if (!service.empty()) stream["grpcSettings"] = {{"serviceName", service}};
+        } else if (type == "httpupgrade") {
+            network = "httpupgrade";
+            nlohmann::json upgrade = nlohmann::json::object();
+            if (!path.empty()) upgrade["path"] = path;
+            auto host = transport.contains("host") ? first_text(transport.at("host")) : std::string{};
+            if (host.empty()) host = header_host(transport);
+            if (!host.empty()) upgrade["host"] = host;
+            if (!upgrade.empty()) stream["httpupgradeSettings"] = std::move(upgrade);
+        } else if (type == "http" || type == "xhttp") {
+            // Xray removed the HTTP (h2) transport; its replacement is XHTTP stream-one.
+            network = "xhttp";
+            nlohmann::json xhttp = nlohmann::json::object();
+            if (!path.empty()) xhttp["path"] = path;
+            auto host = transport.contains("host") ? first_text(transport.at("host")) : std::string{};
+            if (host.empty()) host = header_host(transport);
+            if (!host.empty()) xhttp["host"] = host;
+            auto mode = json_string(transport, "mode");
+            if (mode.empty() && type == "http") mode = "stream-one";
+            if (!mode.empty()) xhttp["mode"] = mode;
+            if (!xhttp.empty()) stream["xhttpSettings"] = std::move(xhttp);
+        } else {
+            throw std::runtime_error("transport " + type + " is not supported by Xray");
+        }
+    }
+    stream["network"] = network;
+    std::string security = "none";
+    const nlohmann::json tls = outbound.contains("tls") ? outbound.at("tls") : nlohmann::json::object();
+    if (json_enabled(tls)) {
+        const auto sni = json_string(tls, "server_name");
+        std::string fingerprint;
+        if (tls.contains("utls") && json_enabled(tls.at("utls"))) fingerprint = json_string(tls.at("utls"), "fingerprint");
+        const nlohmann::json reality = tls.contains("reality") ? tls.at("reality") : nlohmann::json::object();
+        if (json_enabled(reality)) {
+            security = "reality";
+            const auto public_key = json_string(reality, "public_key");
+            if (public_key.empty()) throw std::runtime_error("reality public_key is missing");
+            stream["realitySettings"] = {{"serverName", sni.empty() ? server : sni},
+                                         {"fingerprint", fingerprint.empty() ? "chrome" : fingerprint},
+                                         {"publicKey", public_key},
+                                         {"shortId", json_string(reality, "short_id")}};
+        } else {
+            security = "tls";
+            nlohmann::json settings{{"serverName", sni.empty() ? server : sni}};
+            if (!fingerprint.empty()) settings["fingerprint"] = fingerprint;
+            if (tls.contains("insecure") && tls.at("insecure").is_boolean() && tls.at("insecure").get<bool>()) {
+                settings["allowInsecure"] = true;
+            }
+            if (tls.contains("alpn")) {
+                nlohmann::json alpn = nlohmann::json::array();
+                if (tls.at("alpn").is_string()) alpn.push_back(tls.at("alpn"));
+                if (tls.at("alpn").is_array()) {
+                    for (const auto& item : tls.at("alpn")) {
+                        if (item.is_string()) alpn.push_back(item);
+                    }
+                }
+                if (!alpn.empty()) settings["alpn"] = std::move(alpn);
+            }
+            stream["tlsSettings"] = std::move(settings);
+        }
+    }
+    stream["security"] = security;
+    return stream;
+}
+
 std::string first_cidr(const std::string& text) {
     std::string token;
     for (char c : text) {
@@ -308,7 +434,89 @@ XrayLinkView classify_link_for_core(const std::string& link, const std::string& 
     }
 }
 
-nlohmann::json render_xray_config(const std::vector<SingboxNode>& nodes) {
+nlohmann::json singbox_outbound_to_xray(const nlohmann::json& outbound) {
+    if (!outbound.is_object()) throw std::runtime_error("saved node has no proxy data");
+    const auto type = json_string(outbound, "type");
+    if (type != "vless") {
+        throw std::runtime_error("protocol " + (type.empty() ? std::string("unknown") : type) +
+                                 " is not supported by Xray");
+    }
+    const auto server = json_string(outbound, "server");
+    const int port = json_port(outbound, "server_port");
+    const auto uuid = json_string(outbound, "uuid");
+    if (server.empty() || port == 0) throw std::runtime_error("vless outbound address is invalid");
+    if (uuid.empty()) throw std::runtime_error("vless outbound has no uuid");
+    nlohmann::json user{{"id", uuid}, {"encryption", "none"}};
+    const auto flow = json_string(outbound, "flow");
+    if (!flow.empty()) user["flow"] = flow;
+    // packet_encoding: Xray VLESS uses XUDP for UDP by default, which is what
+    // sing-box "xudp" asks for. "packetaddr" has no Xray client equivalent.
+    const auto packet_encoding = json_string(outbound, "packet_encoding");
+    if (packet_encoding == "packetaddr") {
+        throw std::runtime_error("packet_encoding packetaddr is not supported by Xray");
+    }
+    return {{"protocol", "vless"},
+            {"settings",
+             {{"vnext", nlohmann::json::array(
+                            {{{"address", server}, {"port", port}, {"users", nlohmann::json::array({user})}}})}}},
+            {"streamSettings", xray_stream_from_singbox(outbound, server)}};
+}
+
+XrayLinkView classify_node_for_core(const SingboxNode& node, const std::string& core) {
+    if (!trim_copy(node.link).empty()) return classify_link_for_core(node.link, core);
+    XrayLinkView view;
+    view.name = node.name;
+    view.server = node.server;
+    view.port = node.port;
+    const auto& outbound = node.outbound;
+    const auto type = json_string(outbound, "type");
+    const auto xray_protocol = json_string(outbound, "protocol");
+    view.protocol = !type.empty() ? type : (!xray_protocol.empty() ? xray_protocol : node.protocol);
+    if (!outbound.is_object()) {
+        view.reason = "protocol " + (view.protocol.empty() ? std::string("unknown") : view.protocol) +
+                      " has no saved proxy data";
+        return view;
+    }
+    if (core != "xray") {
+        // sing-box reads its own outbound. An Xray-only outbound needs the link.
+        if (!type.empty()) {
+            view.supported = true;
+            view.outbound = outbound;
+        } else {
+            view.reason = "protocol " + (view.protocol.empty() ? std::string("unknown") : view.protocol) +
+                          " has no sing-box data; refresh the subscription";
+        }
+        return view;
+    }
+    if (type.empty() && xray_protocol == "vless") {
+        view.supported = true;
+        view.outbound = outbound;
+        view.outbound.erase("tag");
+        return view;
+    }
+    try {
+        view.outbound = singbox_outbound_to_xray(outbound);
+        view.supported = true;
+    } catch (const std::exception& error) {
+        view.outbound = nullptr;
+        view.reason = error.what();
+    }
+    return view;
+}
+
+std::vector<std::string> xray_tun_interfaces(const nlohmann::json& config) {
+    std::vector<std::string> names;
+    if (!config.is_object() || !config.contains("inbounds") || !config.at("inbounds").is_array()) return names;
+    for (const auto& inbound : config.at("inbounds")) {
+        if (!inbound.is_object() || json_string(inbound, "protocol") != "tun") continue;
+        if (!inbound.contains("settings")) continue;
+        const auto name = json_string(inbound.at("settings"), "name");
+        if (!name.empty()) names.push_back(name);
+    }
+    return names;
+}
+
+nlohmann::json render_xray_config(const std::vector<SingboxNode>& nodes, bool allow_empty) {
     nlohmann::json inbounds = nlohmann::json::array();
     nlohmann::json outbounds = nlohmann::json::array();
     nlohmann::json rules = nlohmann::json::array();
@@ -330,8 +538,12 @@ nlohmann::json render_xray_config(const std::vector<SingboxNode>& nodes) {
     int fallback_octet = 1;
     for (const auto& node : nodes) {
         if (node.unsupported || node.interface_name.empty()) continue;
-        const auto view = classify_link_for_core(node.link, "xray");
-        if (!view.supported) continue;
+        const auto view = classify_node_for_core(node, "xray");
+        if (!view.supported) {
+            // Never write a config that silently drops a TUN keen-pbr-sx routes to.
+            throw std::runtime_error("Xray config has no outbound for " + node.tag + " (" + node.interface_name +
+                                     "): " + (view.reason.empty() ? std::string("unsupported") : view.reason));
+        }
         const auto id = token_of(node.id);
         const auto inbound_tag = "kpbr-tun-" + id;
         const auto outbound_tag = "kpbr-n-" + id;
@@ -359,8 +571,11 @@ nlohmann::json render_xray_config(const std::vector<SingboxNode>& nodes) {
                          {"inboundTag", nlohmann::json::array({inbound_tag})},
                          {"outboundTag", outbound_tag}});
     }
+    if (inbounds.empty() && !allow_empty) {
+        throw std::runtime_error("Xray config has no TUN inbounds: no node can be carried by Xray");
+    }
     outbounds.push_back({{"protocol", "freedom"}, {"tag", "direct"}});
-    return {{"log", {{"loglevel", "warning"}}},
+    return {{"log", {{"loglevel", "warning"}, {"error", kXrayLogPath}, {"access", "none"}}},
             {"inbounds", std::move(inbounds)},
             {"outbounds", std::move(outbounds)},
             {"routing", {{"domainStrategy", "AsIs"}, {"rules", std::move(rules)}}}};

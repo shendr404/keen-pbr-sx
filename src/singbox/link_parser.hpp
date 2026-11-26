@@ -70,6 +70,9 @@ struct SubscriptionParseInfo {
 struct SubscriptionNode {
     ParsedProxyLink link;
     std::string id;
+    // The original share link when the subscription is a link list. Empty for
+    // sing-box or Clash JSON. Kept so the node can be rebuilt for either core.
+    std::string raw;
 };
 
 // Throws std::runtime_error with a message that does not contain the secret.

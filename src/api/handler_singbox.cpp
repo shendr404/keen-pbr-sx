@@ -194,6 +194,7 @@ void register_singbox_handler(ApiServer& server, ApiContext& ctx, SingboxLinkSer
             apply_proxy();
             const auto json = require_object(body);
             bool icmptest = false;
+            nlohmann::json keen_config = nlohmann::json::object();
             if (ctx.get_visible_config_fn) {
                 const auto config = ctx.get_visible_config_fn();
                 if (config.outbounds) {
@@ -201,8 +202,10 @@ void register_singbox_handler(ApiServer& server, ApiContext& ctx, SingboxLinkSer
                         if (outbound.type == OutboundType::ICMPTEST) icmptest = true;
                     }
                 }
+                api::to_json(keen_config, config);
             }
-            return result_json(service.switch_core(field(json, "core"), field(json, "xray_bin"), icmptest));
+            return result_json(
+                service.switch_core(field(json, "core"), field(json, "xray_bin"), icmptest, keen_config));
         } catch (const nlohmann::json::exception&) {
             throw ApiError("invalid JSON", 400);
         } catch (const SingboxBusy& error) {

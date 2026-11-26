@@ -504,6 +504,7 @@ std::vector<SubscriptionNode> parse_subscription(const std::string& body, Subscr
             node.link.port = view.port;
             node.link.outbound = view.outbound;
             node.id = proxy_node_id(node.link);
+            node.raw = trim(line);
             nodes.push_back(std::move(node));
             return;
         }
@@ -511,6 +512,7 @@ std::vector<SubscriptionNode> parse_subscription(const std::string& body, Subscr
             SubscriptionNode node;
             node.link = parse_proxy_link(line);
             node.id = proxy_node_id(node.link);
+            node.raw = trim(line);
             for (const auto& warning : node.link.warnings) {
                 if (warning.find("encryption") != std::string::npos) ++local.encryption_ignored;
             }

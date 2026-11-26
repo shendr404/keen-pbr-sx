@@ -72,17 +72,18 @@ One setting for the whole router, not per node:
 
 `core` is `sing-box` (default) or `xray`. An empty `xray_bin` is searched as `/opt/bin/xray`, `/opt/usr/bin/xray`, then `PATH`. A set path is used as given.
 
-Generated Xray config: `/opt/etc/keen-pbr-sx/xray.json`. It is ours. `/opt/etc/xray/config.json` belongs to the Entware package and is not overwritten. Before keen-pbr-sx starts its own Xray it stops the Entware init if `S24xray`, `S22xray` or `S99xray` is present, so two processes do not both open a TUN. That stop does not disable the script on flash. keen-pbr-sx starts `xray run -format json -c /opt/etc/keen-pbr-sx/xray.json` itself, detached with `start-stop-daemon -b` and a pid file `/tmp/keen-pbr-sx-xray.pid`. Same rule as the package restart: no `setsid` and no `nohup`.
+Generated Xray config: `/opt/etc/keen-pbr-sx/xray.json`. It is ours. `/opt/etc/xray/config.json` belongs to the Entware package and is not overwritten. Before keen-pbr-sx starts its own Xray it stops the Entware init if `S24xray`, `S22xray` or `S99xray` is present, so two processes do not both open a TUN. That stop does not disable the script on flash. keen-pbr-sx starts `xray run -format json -c /opt/etc/keen-pbr-sx/xray.json` itself, detached with `start-stop-daemon -b` and a pid file `/tmp/keen-pbr-sx-xray.pid`. Same rule as the package restart: no `setsid` and no `nohup`. Xray writes warnings and errors to `/tmp/keen-pbr-sx-xray.log` (`log.error` in `xray.json`, loglevel `warning`); the file is emptied on each start.
 
 Switch, in order. The two device names can exist at once, so the new process is started before the old one is stopped:
 
 1. Refuse if `core` is `xray` and `xray version` is missing or older than `26.10.17`. The refusal is a clear error. The running core is not touched.
-2. Re-parse each stored `link` into that core's outbound. Do not translate the stored sing-box JSON. A node this core cannot render is marked unsupported and keeps its previous interface name. Supported nodes receive the next free `xrtun` or `sbtun` name.
-3. Write a candidate file (`xray.candidate.json` for Xray, so the name ends in `.json`). `xray run -test -format json -c` or `sing-box check -c` must pass, or nothing else changes. The candidate is removed either way.
-4. Write the live core file and start the selected process while the previous one is still running.
-5. In one keen-pbr-sx config save, recreate every managed `interface` outbound (same tag, new interface), rewrite group members that named the old TUN, and store `proxy.core` / `proxy.xray_bin`.
-6. Stop the previous core. Rewrite the link store only after that stop succeeds.
-7. If start, the keen-pbr-sx save, or the stop fails: stop the process just started, restore the core file, put the previous interface outbounds and `proxy` back, and start the previous core again. The link store stays on the previous core.
+2. Re-parse each stored `link` into that core's outbound. Subscription nodes saved before links were stored have only the sing-box outbound; for Xray a sing-box `vless` outbound is converted (server, uuid, flow, TLS or Reality with uTLS fingerprint, ws/grpc/httpupgrade, and `http` as XHTTP `stream-one`). Anything else, such as `hysteria2`, is unsupported with the protocol in the reason. A node this core cannot render is marked unsupported and keeps its previous interface name. Supported nodes receive the next free `xrtun` or `sbtun` name. New subscriptions keep the original link of each node.
+3. Refuse, before touching anything, if the Xray config would have no TUN inbound, if a carried node has no outbound, or if an enabled route rule or a DNS server `detour` would be left on an interface that stops with sing-box (an unsupported node, or a TUN from the user's own sing-box config such as `sbtun`). A urltest/icmptest group counts as lost only when all of its members are. The error names the rule or DNS server; point it at an `xrtun` outbound or `wan` first.
+4. Write a candidate file (`xray.candidate.json` for Xray, so the name ends in `.json`). `xray run -test -format json -c` or `sing-box check -c` must pass, or nothing else changes. The candidate is removed either way.
+5. Write the live core file and start the selected process while the previous one is still running. For Xray, wait up to 20 s until every expected `xrtun` exists and is up. On timeout stop Xray and restore the file; sing-box was never stopped.
+6. In one keen-pbr-sx config save, recreate every managed `interface` outbound (same tag, new interface), rewrite group members that named the old TUN, and store `proxy.core` / `proxy.xray_bin`.
+7. Stop the previous core. Rewrite the link store only after that stop succeeds.
+8. If start, the keen-pbr-sx save, or the stop fails: stop the process just started, restore the core file, put the previous interface outbounds and `proxy` back, and start the previous core again. The link store stays on the previous core.
 
 A failed test never stops the live process.
 

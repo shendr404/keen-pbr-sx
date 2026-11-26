@@ -976,7 +976,7 @@ FetchedSubscription parse_fetched(const std::string& body, const std::string& co
             throw std::runtime_error(message);
         }
     }
-    for (auto& item : parsed) fetched.nodes.push_back(node_from_parsed(std::move(item.link), {}));
+    for (auto& item : parsed) fetched.nodes.push_back(node_from_parsed(std::move(item.link), std::move(item.raw)));
     assign_identities(fetched.nodes);
     for (const auto& node : fetched.nodes) fetched.catalog.push_back(entry_from_node(node));
     for (const auto& skipped : fetched.info.skipped_nodes) {
@@ -1172,6 +1172,104 @@ std::string outbound_reference_message(const nlohmann::json& config, const std::
     return message;
 }
 
+namespace {
+
+std::string text_at(const nlohmann::json& object, const char* key) {
+    if (!object.is_object() || !object.contains(key) || !object.at(key).is_string()) return {};
+    return object.at(key).get<std::string>();
+}
+
+std::vector<std::string> group_member_tags(const nlohmann::json& outbound) {
+    std::vector<std::string> tags;
+    if (!outbound.contains("outbound_groups") || !outbound.at("outbound_groups").is_array()) return tags;
+    for (const auto& group : outbound.at("outbound_groups")) {
+        if (!group.is_object()) continue;
+        for (const char* key : {"members", "outbounds", "candidates"}) {
+            if (!group.contains(key) || !group.at(key).is_array()) continue;
+            for (const auto& member : group.at(key)) {
+                if (member.is_string()) tags.push_back(member.get<std::string>());
+                else if (member.is_object() && !text_at(member, "outbound").empty()) tags.push_back(text_at(member, "outbound"));
+            }
+        }
+    }
+    return tags;
+}
+
+std::string join_names(const std::set<std::string>& names) {
+    std::string text;
+    for (const auto& name : names) {
+        if (!text.empty()) text += ", ";
+        text += name;
+    }
+    return text;
+}
+
+}  // namespace
+
+std::string core_switch_blockers(const nlohmann::json& config, const std::set<std::string>& vanishing) {
+    if (!config.is_object() || vanishing.empty()) return {};
+    std::set<std::string> lost;
+    std::set<std::string> lost_interfaces;
+    const bool has_outbounds = config.contains("outbounds") && config.at("outbounds").is_array();
+    if (has_outbounds) {
+        for (const auto& outbound : config.at("outbounds")) {
+            if (text_at(outbound, "type") != "interface") continue;
+            const auto name = text_at(outbound, "interface");
+            if (vanishing.count(name)) {
+                lost.insert(text_at(outbound, "tag"));
+                lost_interfaces.insert(name);
+            }
+        }
+        // A group is lost when every member is lost. Groups can nest.
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (const auto& outbound : config.at("outbounds")) {
+                const auto type = text_at(outbound, "type");
+                if (type != "urltest" && type != "icmptest") continue;
+                const auto tag = text_at(outbound, "tag");
+                if (tag.empty() || lost.count(tag)) continue;
+                const auto members = group_member_tags(outbound);
+                if (members.empty()) continue;
+                if (std::all_of(members.begin(), members.end(), [&](const std::string& m) { return lost.count(m) > 0; })) {
+                    lost.insert(tag);
+                    changed = true;
+                }
+            }
+        }
+    }
+    lost.erase("");
+    if (lost.empty()) return {};
+    std::vector<std::string> users;
+    if (config.contains("route") && config.at("route").is_object() && config.at("route").contains("rules") &&
+        config.at("route").at("rules").is_array()) {
+        int index = 0;
+        for (const auto& rule : config.at("route").at("rules")) {
+            ++index;
+            if (!rule.is_object()) continue;
+            if (rule.contains("enabled") && rule.at("enabled").is_boolean() && !rule.at("enabled").get<bool>()) continue;
+            const auto tag = text_at(rule, "outbound");
+            if (lost.count(tag)) users.push_back("route rule " + std::to_string(index) + " -> " + tag);
+        }
+    }
+    if (config.contains("dns") && config.at("dns").is_object() && config.at("dns").contains("servers") &&
+        config.at("dns").at("servers").is_array()) {
+        for (const auto& server : config.at("dns").at("servers")) {
+            const auto detour = text_at(server, "detour");
+            if (lost.count(detour)) users.push_back("DNS server " + text_at(server, "tag") + " (detour " + detour + ")");
+        }
+    }
+    if (users.empty()) return {};
+    std::string message = "Xray would leave ";
+    for (std::size_t i = 0; i < users.size(); ++i) {
+        if (i != 0) message += ", ";
+        message += users[i];
+    }
+    message += " without a path: " + join_names(lost_interfaces) +
+               " stop with sing-box and Xray does not replace them. Point them at an Xray interface (xrtun...) "
+               "or wan first. The core was not switched.";
+    return message;
+}
+
 nlohmann::json SingboxLinkService::render_singbox_config(const std::vector<SingboxNode>& nodes) {
     bool remove_file = false;
     return merge_singbox_config(nlohmann::json::object(), nodes, &remove_file);
@@ -1186,11 +1284,12 @@ SingboxStore SingboxLinkService::load_store(const std::string& path) {
 SingboxLinkService::SingboxLinkService(SingboxPaths paths, SingboxCheck check, KeeneticSyncFn keenetic,
                                        SingboxReloadFn reload, SubscriptionDownloadFn download,
                                        SubscriptionClock clock, CoreProcessFn process, XrayTestFn test,
-                                       XrayVersionFn version, RamFn ram)
+                                       XrayVersionFn version, RamFn ram, InterfaceWaitFn wait)
     : paths_(std::move(paths)), check_(std::move(check)), keenetic_(std::move(keenetic)),
       reload_(std::move(reload)), download_(std::move(download)),
       clock_(clock ? std::move(clock) : now_unix), core_process_(std::move(process)),
-      xray_test_(std::move(test)), xray_version_(std::move(version)), ram_(std::move(ram)) {
+      xray_test_(std::move(test)), xray_version_(std::move(version)), ram_(std::move(ram)),
+      interface_wait_(std::move(wait)) {
     const auto slash = paths_.store.find_last_of('/');
     if (slash != std::string::npos) xray_config_ = paths_.store.substr(0, slash) + "/xray.json";
 }
@@ -1334,7 +1433,7 @@ SingboxApplyResult SingboxLinkService::persist(const SingboxStore& previous, Sin
     if (rewrite_singbox) {
         const auto existing = read_config_object();
         bool remove_file = false;
-        const auto rendered = xray ? render_xray_config(live_nodes)
+        const auto rendered = xray ? render_xray_config(live_nodes, live_nodes.empty())
                                    : merge_singbox_config(existing, live_nodes, &remove_file);
         if (!xray && remove_file) {
             preserve_original_config(paths_.singbox_config);
@@ -1839,7 +1938,7 @@ void SingboxLinkService::set_core_hooks(CoreProcessFn process, XrayTestFn test, 
 }
 
 SingboxApplyResult SingboxLinkService::switch_core(const std::string& requested, const std::string& xray_bin,
-                                                   bool icmptest_groups) {
+                                                   bool icmptest_groups, const nlohmann::json& keen_config) {
     const auto lock = begin_mutation();
     if (requested != "sing-box" && requested != "xray") {
         throw std::runtime_error("proxy.core must be sing-box or xray");
@@ -1863,11 +1962,9 @@ SingboxApplyResult SingboxLinkService::switch_core(const std::string& requested,
     previous_interfaces.reserve(next.nodes.size());
     for (auto& node : next.nodes) {
         previous_interfaces.push_back(node.interface_name);
-        const auto view = classify_link_for_core(node.link, requested);
-        if (node.link.empty() && node.protocol == "vless" && requested == "xray") {
-            node.unsupported = false;
-            node.unsupported_reason.clear();
-        } else if (!view.supported) {
+        // Subscription nodes may carry only the stored outbound; classify that.
+        const auto view = classify_node_for_core(node, requested);
+        if (!view.supported) {
             node.unsupported = true;
             node.unsupported_reason = view.reason.empty()
                                           ? std::string("protocol ") + node.protocol + " is not supported by " +
@@ -1876,7 +1973,9 @@ SingboxApplyResult SingboxLinkService::switch_core(const std::string& requested,
         } else {
             node.unsupported = false;
             node.unsupported_reason.clear();
-            if (requested == "xray") node.outbound = view.outbound;
+            // Without a link the sing-box outbound is the only copy of the node.
+            // Keep it; render_xray_config converts it again.
+            if (requested == "xray" && !node.link.empty()) node.outbound = view.outbound;
         }
         if (!node.unsupported) node.interface_name.clear();
     }
@@ -1897,8 +1996,39 @@ SingboxApplyResult SingboxLinkService::switch_core(const std::string& requested,
     for (const auto& node : next.nodes) {
         if (!node.unsupported) live.push_back(node);
     }
+    // render_xray_config throws when a carried node has no outbound or nothing
+    // would be carried at all. Nothing has been touched yet.
     const auto rendered = requested == "xray" ? render_xray_config(live)
                                               : merge_singbox_config(read_config_object(), live, nullptr);
+    std::vector<std::string> new_interfaces;
+    if (requested == "xray") {
+        new_interfaces = xray_tun_interfaces(rendered);
+        // Everything sing-box serves now stops with it: unsupported nodes and the
+        // user's own TUN inbounds in the sing-box config.
+        std::set<std::string> vanishing(previous_interfaces.begin(), previous_interfaces.end());
+        try {
+            const auto singbox = read_config_object();
+            if (singbox.contains("inbounds") && singbox["inbounds"].is_array()) {
+                for (const auto& inbound : singbox["inbounds"]) {
+                    if (!inbound.is_object() || !inbound.contains("interface_name") ||
+                        !inbound["interface_name"].is_string()) {
+                        continue;
+                    }
+                    vanishing.insert(inbound["interface_name"].get<std::string>());
+                }
+            }
+        } catch (const std::exception&) {
+            // An unreadable sing-box config cannot add interfaces.
+        }
+        for (const auto& name : new_interfaces) vanishing.erase(name);
+        // Carried nodes are renamed in the keen-pbr-sx config in the same save.
+        for (std::size_t i = 0; i < next.nodes.size(); ++i) {
+            if (!next.nodes[i].unsupported) vanishing.erase(previous_interfaces[i]);
+        }
+        vanishing.erase("");
+        const auto blockers = core_switch_blockers(keen_config, vanishing);
+        if (!blockers.empty()) throw std::runtime_error(blockers);
+    }
     const auto target = requested == "xray" ? xray_config_ : paths_.singbox_config;
     const auto candidate = candidate_of(target);
     write_private(candidate, rendered.dump(2));
@@ -1923,6 +2053,16 @@ SingboxApplyResult SingboxLinkService::switch_core(const std::string& requested,
         if (!core_process_ || !core_process_("xray", "start", bin, target)) {
             rollback_files();
             throw std::runtime_error("could not start xray");
+        }
+        // Make before break: sing-box keeps running until every xrtun is up.
+        if (interface_wait_ && !interface_wait_(new_interfaces, interface_wait_ms_)) {
+            stop_new();
+            rollback_files();
+            std::string names;
+            for (const auto& name : new_interfaces) names += (names.empty() ? "" : ", ") + name;
+            throw std::runtime_error("Xray did not bring up " + names + " in " +
+                                     std::to_string(interface_wait_ms_ / 1000) +
+                                     " s; sing-box was left running. See " + kXrayLogPath);
         }
     } else if (!reload_ || !reload_()) {
         rollback_files();
