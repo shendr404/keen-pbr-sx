@@ -32,6 +32,7 @@ add_executable(keen-pbr-sx-tests
   test_dnsmasq_preflight.cpp
   test_dnsmasq_real.cpp
   test_test_routing.cpp
+  test_core_cmd.cpp
   test_keenetic_dns.cpp
   test_dns_balancer.cpp
   test_dns_check.cpp
@@ -125,6 +126,7 @@ add_executable(keen-pbr-sx-tests
   ../src/health/service_health.cpp
   ../src/health/routing_health_checker.cpp
   ../src/health/host_health_warnings.cpp
+  ../src/cmd/core_cmd.cpp
   ../src/cmd/dnsmasq_cmd.cpp
   ../src/cmd/resolver_config.cpp
   ../src/cmd/status.cpp

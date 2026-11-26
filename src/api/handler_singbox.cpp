@@ -174,6 +174,28 @@ void sync_keenetic_outbounds(ApiContext& ctx, const KeeneticSyncRequest& request
 
 }  // namespace
 
+nlohmann::json switch_proxy_core(ApiContext& ctx, SingboxLinkService& service, const std::string& core,
+                                 const std::string& xray_bin) {
+    if (!ctx.get_visible_config_fn) throw std::runtime_error("config apply is unavailable");
+    const auto config = ctx.get_visible_config_fn();
+    std::string current_core = "sing-box";
+    std::string current_bin;
+    if (config.proxy) {
+        if (config.proxy->core && !config.proxy->core->empty()) current_core = *config.proxy->core;
+        if (config.proxy->xray_bin) current_bin = *config.proxy->xray_bin;
+    }
+    service.set_proxy(current_core, current_bin);
+    bool icmptest = false;
+    if (config.outbounds) {
+        for (const auto& outbound : *config.outbounds) {
+            if (outbound.type == OutboundType::ICMPTEST) icmptest = true;
+        }
+    }
+    nlohmann::json keen_config = nlohmann::json::object();
+    api::to_json(keen_config, config);
+    return nlohmann::json::parse(result_json(service.switch_core(core, xray_bin, icmptest, keen_config)));
+}
+
 void register_singbox_handler(ApiServer& server, ApiContext& ctx, SingboxLinkService& service) {
     auto apply_proxy = [&ctx, &service] {
         if (!ctx.get_visible_config_fn) return;
@@ -189,23 +211,10 @@ void register_singbox_handler(ApiServer& server, ApiContext& ctx, SingboxLinkSer
     service.set_keenetic_callback([&ctx](const KeeneticSyncRequest& request) {
         sync_keenetic_outbounds(ctx, request);
     });
-    server.post("/api/sing-box/core", [&service, &ctx, apply_proxy](const std::string& body) {
+    server.post("/api/sing-box/core", [&service, &ctx](const std::string& body) {
         try {
-            apply_proxy();
             const auto json = require_object(body);
-            bool icmptest = false;
-            nlohmann::json keen_config = nlohmann::json::object();
-            if (ctx.get_visible_config_fn) {
-                const auto config = ctx.get_visible_config_fn();
-                if (config.outbounds) {
-                    for (const auto& outbound : *config.outbounds) {
-                        if (outbound.type == OutboundType::ICMPTEST) icmptest = true;
-                    }
-                }
-                api::to_json(keen_config, config);
-            }
-            return result_json(
-                service.switch_core(field(json, "core"), field(json, "xray_bin"), icmptest, keen_config));
+            return switch_proxy_core(ctx, service, field(json, "core"), field(json, "xray_bin")).dump();
         } catch (const nlohmann::json::exception&) {
             throw ApiError("invalid JSON", 400);
         } catch (const SingboxBusy& error) {

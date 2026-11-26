@@ -45,6 +45,7 @@
 #include "scheduler.hpp"
 
 #ifdef WITH_API
+#include "../api/handler_singbox.hpp"
 #include "../api/handlers.hpp" // IWYU pragma: keep
 #include "../api/server.hpp"
 #include "../api/sse_broadcaster.hpp"
@@ -752,6 +753,16 @@ Daemon::health_issues_from(const ServiceHealthState &service,
         std::move(list.error)});
   }
   auto result = collect_health_issues(inputs);
+  if (const auto core_error = singbox_links_.core_error(); !core_error.empty()) {
+    api::HealthIssue issue{};
+    issue.code = api::Code::HOST_WARNING;
+    issue.severity = api::Severity::ERROR;
+    issue.key = "proxy-core-xray";
+    issue.title = "Xray core did not start";
+    issue.detail = core_error + ". sing-box is off; switch the core back or fix Xray.";
+    issue.params = {{"warning", "xray_core"}};
+    result.issues.push_back(std::move(issue));
+  }
   for (const auto &[id, error] : singbox_links_.subscription_errors()) {
     api::HealthIssue issue{};
     issue.code = api::Code::HOST_WARNING;
@@ -1112,6 +1123,60 @@ bool Daemon::queue_subscription_refresh(
   return false;
 }
 
+void Daemon::ensure_proxy_core(const char *reason) {
+  auto &log = Logger::instance();
+  try {
+    const Config active = config_store_.active_config();
+    std::string core = "sing-box";
+    std::string bin;
+    if (active.proxy) {
+      if (active.proxy->core && !active.proxy->core->empty()) core = *active.proxy->core;
+      if (active.proxy->xray_bin) bin = *active.proxy->xray_bin;
+    }
+    singbox_links_.set_proxy(core, bin);
+    if (core != "xray") return;
+    log.info("{}: proxy.core is xray; starting Xray and keeping sing-box off", reason);
+    const auto result = singbox_links_.ensure_core_running();
+    if (!result.ok) {
+      // No silent swap of the core: sing-box stays off and the error is shown
+      // as a health issue until Xray works or the core is switched back.
+      log.error("{}: Xray did not start: {}. sing-box stays OFF (no automatic fallback). "
+                "Fix the cause and run `keen-pbr-sx core xray`, or run `keen-pbr-sx core sing-box`.",
+                reason, result.message);
+    } else if (result.changed) {
+      log.info("{}: Xray is running with its interfaces up; sing-box is off", reason);
+    } else {
+      log.info("{}: Xray was already running with the current config", reason);
+    }
+  } catch (const std::exception &error) {
+    log.error("{}: core startup check failed: {}", reason, error.what());
+  } catch (...) {
+    log.error("{}: core startup check failed: unknown error", reason);
+  }
+}
+
+void Daemon::guard_stray_singbox() {
+  // sing-box has its own init (S99sing-box) that runs after ours at boot. For
+  // the first ten minutes, stop it if it shows up while proxy.core is xray.
+  constexpr int kGuardTicks = 20;
+  if (core_guard_ticks_.fetch_add(1, std::memory_order_acq_rel) >= kGuardTicks) return;
+  if (!blocking_executor_.try_post("xray-core-guard", [this] {
+        try {
+          const Config active = config_store_.active_config();
+          if (!active.proxy || !active.proxy->core || *active.proxy->core != "xray") return;
+          singbox_links_.set_proxy("xray", active.proxy->xray_bin.value_or(""));
+          if (singbox_links_.stop_stray_singbox()) {
+            Logger::instance().warn(
+                "proxy.core is xray but sing-box was running (started by its own init); stopped it");
+          }
+        } catch (const std::exception &error) {
+          Logger::instance().warn("sing-box guard failed: {}", error.what());
+        }
+      })) {
+    return;
+  }
+}
+
 void Daemon::handle_ipc_control_socket() {
   while (true) {
     IpcControlRequest accepted;
@@ -1161,6 +1226,58 @@ void Daemon::handle_ipc_control_socket() {
           }
           response = ipc::make_error_response(
               request, "busy", "another subscription refresh is in progress");
+        } else if (operation == "core-status") {
+          const auto active = config_store_.active_config();
+          singbox_links_.set_proxy(
+              active.proxy && active.proxy->core && !active.proxy->core->empty() ? *active.proxy->core : "sing-box",
+              active.proxy && active.proxy->xray_bin ? *active.proxy->xray_bin : "");
+          response = {{"protocol_version", ipc::kControlProtocolVersion},
+                      {"request_id", request.at("request_id")},
+                      {"ok", true},
+                      {"result", singbox_links_.core_status()}};
+        } else if (operation == "core-switch") {
+#ifdef WITH_API
+          const auto core = request.value("core", std::string{});
+          const auto xray_bin = request.value("xray_bin", std::string{});
+          if (!api_ctx_) {
+            response = ipc::make_error_response(
+                request, "api_unavailable",
+                "switching the core saves the config through the REST API subsystem; enable api.enabled "
+                "(and do not run with --no-api)");
+          } else if (runtime_state_machine_.state() != RuntimeState::running &&
+                     runtime_state_machine_.state() != RuntimeState::restart_required) {
+            response = ipc::make_error_response(request, "busy",
+                                                "routing runtime is not running yet or is being applied");
+          } else if (core_switch_inflight_.exchange(true)) {
+            response = ipc::make_error_response(request, "busy", "another core switch is in progress");
+          } else if (blocking_executor_.try_post(
+                         "ipc-core-switch", [this, client, request, core, xray_bin] {
+                           nlohmann::json reply;
+                           try {
+                             reply = {{"protocol_version", ipc::kControlProtocolVersion},
+                                      {"request_id", request.at("request_id")},
+                                      {"ok", true},
+                                      {"result", switch_proxy_core(*api_ctx_, singbox_links_, core, xray_bin)}};
+                           } catch (const SingboxBusy &error) {
+                             reply = ipc::make_error_response(request, "busy", error.what());
+                           } catch (const std::exception &error) {
+                             reply = ipc::make_error_response(request, "core_switch_failed", error.what());
+                           } catch (...) {
+                             reply = ipc::make_error_response(request, "core_switch_failed", "unknown error");
+                           }
+                           core_switch_inflight_.store(false);
+                           if (status_stream_) status_stream_->reconcile(StatusUpdate::Issues);
+                           send_control_response_and_close(client, reply);
+                         })) {
+            continue;
+          } else {
+            core_switch_inflight_.store(false);
+            response = ipc::make_error_response(request, "busy", "executor queue is full");
+          }
+#else
+          response = ipc::make_error_response(request, "api_unavailable",
+                                              "this build has no REST API; the core cannot be switched");
+#endif
         } else if (operation != "status" && operation != "download" &&
                    operation != "test-routing") {
           response = ipc::make_error_response(request, "unsupported_operation",
@@ -1599,6 +1716,7 @@ void Daemon::handle_sighup() {
           upgrade_config_file_if_needed(config_path_, disk_text);
           result = apply_validated_config_via_control_task(std::move(candidate),
                                                            "", false);
+          if (result.error.empty()) ensure_proxy_core("SIGHUP");
         } catch (const std::exception &error) {
           result.error = error.what();
         }
@@ -1990,6 +2108,8 @@ void Daemon::begin_startup_runtime() {
     const auto relevant_lists = collect_relevant_list_names(config_);
     const bool queued = blocking_executor_.try_post(
         "startup-lists", [this, relevant_lists] {
+          // Xray first: routing is applied only after its interfaces exist.
+          ensure_proxy_core("startup");
           std::optional<RemoteListsRefreshResult> refresh_result;
           std::string error;
           try {
@@ -2100,6 +2220,9 @@ void Daemon::run() {
   scheduler_->schedule_repeating(
       std::chrono::seconds{30}, [this] { queue_subscription_refresh("", true); },
       "sing-box-subscriptions");
+
+  scheduler_->schedule_repeating(
+      std::chrono::seconds{30}, [this] { guard_stray_singbox(); }, "xray-core-guard");
 
   log.info("Daemon control plane running. PID: {}", getpid());
   post_control_task([this] { begin_startup_runtime(); }, "startup-runtime");

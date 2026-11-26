@@ -11,6 +11,7 @@
 #include <fstream>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1925,6 +1926,9 @@ nlohmann::json SingboxLinkService::refresh_subscriptions(const std::string& subs
 std::string SingboxLinkService::tun_prefix() const { return tun_prefix_for_core(proxy_core_); }
 
 void SingboxLinkService::set_proxy(std::string core, std::string xray_bin) {
+    // A switch in progress sets the core itself; do not race it.
+    std::unique_lock<std::mutex> lock(mutation_mutex_, std::try_to_lock);
+    if (!lock) return;
     if (core != "xray") core = "sing-box";
     proxy_core_ = std::move(core);
     xray_bin_ = std::move(xray_bin);
@@ -1935,6 +1939,118 @@ void SingboxLinkService::set_core_hooks(CoreProcessFn process, XrayTestFn test, 
     xray_test_ = std::move(test);
     xray_version_ = std::move(version);
     ram_ = std::move(ram);
+}
+
+std::string SingboxLinkService::core_error() const {
+    std::lock_guard<std::mutex> lock(status_mutex_);
+    return core_error_;
+}
+
+CoreStartResult SingboxLinkService::ensure_core_running() {
+    CoreStartResult out;
+    // A refresh or a switch may hold the lock for a moment right at boot.
+    std::unique_lock<std::mutex> lock(mutation_mutex_, std::try_to_lock);
+    for (int attempt = 0; !lock && attempt < 60; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        lock = std::unique_lock<std::mutex>(mutation_mutex_, std::try_to_lock);
+    }
+    out.core = proxy_core_;
+    if (!lock) {
+        out.ok = false;
+        out.message = "another sing-box operation is in progress";
+        return out;
+    }
+    const auto set_error = [&](const std::string& text) {
+        std::lock_guard<std::mutex> guard(status_mutex_);
+        core_error_ = text;
+    };
+    if (proxy_core_ != "xray") {
+        set_error({});
+        return out;
+    }
+    try {
+        const auto bin = resolve_xray_binary(xray_bin_);
+        const auto store = read();
+        std::vector<SingboxNode> live;
+        for (const auto& node : store.nodes) {
+            if (!node.unsupported) live.push_back(node);
+        }
+        // Throws when nothing can be carried or a node has no outbound.
+        const auto rendered = render_xray_config(live);
+        const auto body = rendered.dump(2);
+        const auto interfaces = xray_tun_interfaces(rendered);
+        const bool same_file = read_file(xray_config_) == body;
+        const bool alive = core_process_ && core_process_("xray", "alive", bin, xray_config_);
+        const bool up = alive && same_file && interface_wait_ && interface_wait_(interfaces, 1000);
+        if (!up) {
+            if (!same_file) {
+                const auto candidate = candidate_of(xray_config_);
+                write_private(candidate, body);
+                std::string error;
+                const int code = xray_test_ ? xray_test_(bin, candidate, &error) : 0;
+                ::unlink(candidate.c_str());
+                if (code != 0) throw std::runtime_error(error.empty() ? "xray run -test failed" : error);
+                backup_file(xray_config_);
+                write_private(xray_config_, body);
+            }
+            if (!core_process_ || !core_process_("xray", "start", bin, xray_config_)) {
+                throw std::runtime_error("could not start xray");
+            }
+            if (interface_wait_ && !interface_wait_(interfaces, interface_wait_ms_)) {
+                core_process_("xray", "stop", bin, xray_config_);
+                std::string names;
+                for (const auto& name : interfaces) names += (names.empty() ? "" : ", ") + name;
+                throw std::runtime_error("Xray did not bring up " + names + " in " +
+                                         std::to_string(interface_wait_ms_ / 1000) + " s; see " + kXrayLogPath);
+            }
+            out.changed = true;
+        }
+        // One core per router: whatever started sing-box before us is stopped.
+        if (core_process_ && core_process_("sing-box", "alive", "", "")) {
+            core_process_("sing-box", "stop", "", "");
+            out.changed = true;
+        }
+        set_error({});
+    } catch (const std::exception& error) {
+        out.ok = false;
+        out.message = error.what();
+        set_error(out.message);
+        // sing-box stays off: there is no silent swap of the core.
+        try {
+            if (core_process_ && core_process_("sing-box", "alive", "", "")) core_process_("sing-box", "stop", "", "");
+        } catch (const std::exception&) {
+        }
+    }
+    return out;
+}
+
+bool SingboxLinkService::stop_stray_singbox() {
+    std::unique_lock<std::mutex> lock(mutation_mutex_, std::try_to_lock);
+    if (!lock || proxy_core_ != "xray" || !core_process_) return false;
+    if (!core_process_("sing-box", "alive", "", "")) return false;
+    core_process_("sing-box", "stop", "", "");
+    return true;
+}
+
+nlohmann::json SingboxLinkService::core_status() const {
+    nlohmann::json status{{"core", proxy_core_},
+                          {"xray_bin", resolve_xray_binary(xray_bin_)},
+                          {"xray_running", core_process_ ? core_process_("xray", "alive", "", "") : false},
+                          {"singbox_running", core_process_ ? core_process_("sing-box", "alive", "", "") : false},
+                          {"error", core_error()},
+                          {"interfaces", nlohmann::json::array()}};
+    try {
+        for (const auto& node : read().nodes) {
+            status["interfaces"].push_back(
+                {{"name", node.interface_name},
+                 {"tag", node.tag},
+                 {"unsupported", node.unsupported},
+                 {"up", !node.unsupported && interface_wait_ && interface_wait_({node.interface_name}, 0)}});
+        }
+    } catch (const std::exception&) {
+        status["interfaces"] = nlohmann::json::array();
+    }
+    return status;
 }
 
 SingboxApplyResult SingboxLinkService::switch_core(const std::string& requested, const std::string& xray_bin,
@@ -2110,6 +2226,10 @@ SingboxApplyResult SingboxLinkService::switch_core(const std::string& requested,
     }
     proxy_core_ = requested;
     xray_bin_ = bin;
+    {
+        std::lock_guard<std::mutex> guard(status_mutex_);
+        core_error_.clear();
+    }
     SingboxApplyResult result;
     result.singbox_checked = true;
     result.singbox_reloaded = true;

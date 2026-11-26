@@ -15,6 +15,7 @@ IPSET_COMPONENTS_MESSAGE="ipset kernel modules are not available. Make sure that
 KEENETIC_RCI_STARTUP_ATTEMPTS=15
 CLEANUP_FIREWALL="${CLEANUP_FIREWALL:-/opt/usr/lib/keen-pbr-sx/cleanup-firewall.sh}"
 STOP_WAIT_SECONDS=15
+XRAY_PIDFILE="${XRAY_PIDFILE:-/tmp/keen-pbr-sx-xray.pid}"
 
 log() {
     logger -s -t "keen-pbr-sx" "$1"
@@ -365,6 +366,33 @@ pidof() {
     printf '%s\n' "$pid"
 }
 
+# The daemon starts Xray itself (proxy.core=xray) and leaves it running
+# detached, so the init script has to stop it: with the daemon on stop/kill,
+# and before the daemon on restart (the new daemon starts it again).  The pid
+# file is checked against /proc/PID/comm so a recycled pid is never killed.
+stop_xray() {
+    local pid waited=0
+
+    [ -s "$XRAY_PIDFILE" ] || return 0
+    pid=$(cat "$XRAY_PIDFILE" 2>/dev/null)
+    case "$pid" in ''|*[!0-9]*) rm -f "$XRAY_PIDFILE"; return 0 ;; esac
+    if [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "xray" ]; then
+        kill "$pid" 2>/dev/null
+        while [ -d "/proc/$pid" ] && [ "$waited" -lt 5 ]; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+        if [ -d "/proc/$pid" ]; then
+            kill -9 "$pid" 2>/dev/null
+            log_warn "Xray PID $pid did not stop on TERM; sent KILL"
+        else
+            log "Stopped Xray PID $pid"
+        fi
+    fi
+    rm -f "$XRAY_PIDFILE"
+    return 0
+}
+
 prepare_start() {
     wait_for_keenetic_rci
     check_runtime_dependencies
@@ -406,6 +434,7 @@ case "$1" in
         ;;
     start|restart|restartall)
         prepare_start
+        case "$1" in restart|restartall) stop_xray ;; esac
         ;;
     stop|kill)
         prepare_stop
@@ -423,6 +452,7 @@ case "$1" in
             /opt/usr/lib/keen-pbr-sx/interface-forward.sh apply || true
         ;;
     stop|kill)
+        stop_xray
         cleanup_after_stop
         ;;
 esac

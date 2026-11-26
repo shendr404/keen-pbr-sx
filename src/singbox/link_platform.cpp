@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -43,7 +44,31 @@ void stop_packaged_xray() {
     }
 }
 
+// True when /proc has a process whose name is exactly comm_name.
+bool process_named(const std::string& comm_name) {
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc", ec)) {
+        const auto name = entry.path().filename().string();
+        if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos) continue;
+        std::ifstream comm(entry.path() / "comm");
+        std::string text;
+        if (comm && std::getline(comm, text) && text == comm_name) return true;
+    }
+    return false;
+}
+
+// The process named in the pid file is alive and is xray.
+bool xray_alive() {
+    std::ifstream input("/tmp/keen-pbr-sx-xray.pid");
+    long pid = 0;
+    if (!(input >> pid) || pid <= 0) return false;
+    std::ifstream comm("/proc/" + std::to_string(pid) + "/comm");
+    std::string text;
+    return comm && std::getline(comm, text) && text == "xray";
+}
+
 bool xray_process(const std::string& action, const std::string& bin, const std::string& config) {
+    if (action == "alive") return xray_alive();
     const auto ssd = start_stop_daemon();
     const std::string pid = "/tmp/keen-pbr-sx-xray.pid";
     if (action != "stop") stop_packaged_xray();
@@ -131,7 +156,10 @@ SingboxLinkService make_singbox_link_service() {
         },
         {},
         [](const std::string& core, const std::string& action, const std::string& bin, const std::string& config) {
-            if (core == "sing-box") return singbox_script(action == "stop" ? "stop" : "restart");
+            if (core == "sing-box") {
+                if (action == "alive") return process_named("sing-box");
+                return singbox_script(action == "stop" ? "stop" : "restart");
+            }
             return xray_process(action, bin, config);
         },
         [](const std::string& bin, const std::string& config, std::string* error) {

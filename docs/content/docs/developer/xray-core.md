@@ -87,6 +87,19 @@ Switch, in order. The two device names can exist at once, so the new process is 
 
 A failed test never stops the live process.
 
+## Startup, reload and reboot
+
+With `proxy.core` set to `xray`, the service owns the Xray process:
+
+- **Service start** (also after a reboot, via `S80keen-pbr-sx`). Before the routing is applied, the service regenerates `/opt/etc/keen-pbr-sx/xray.json` from the link store, runs `xray run -test`, starts Xray with the pid file `/tmp/keen-pbr-sx-xray.pid`, and waits up to 20 s for every `xrtun` interface to come up. Only then are the routing rules applied. sing-box is not started. The package `S99sing-box` init runs after ours and may start sing-box anyway; the service stops it once Xray is up and checks again every 30 s for the first ten minutes.
+- **Reload** (`S80keen-pbr-sx reload`, SIGHUP, config apply). The same check runs after the apply. If Xray is alive, `xray.json` is unchanged and the interfaces are up, nothing is restarted. A dead Xray, or one whose config changed, is started again.
+- **Init script.** `S80keen-pbr-sx stop` and `kill` stop Xray after the service; `restart` stops it first and the new service starts it again. The script reads the pid file and kills the process only if `/proc/<pid>/comm` is `xray`. `start` leaves a running Xray alone.
+- **`proxy.core` is `sing-box`.** Nothing changes: the service does not touch Xray.
+
+**If Xray does not start, there is no fallback to sing-box.** The service logs the reason, keeps sing-box off and records the error. The error is shown by `keen-pbr-sx core status` (State: ERROR), by `keen-pbr-sx status` and in the web UI as a problem. The causes are in `/tmp/keen-pbr-sx-xray.log` (the file is recreated on each Xray start) and in syslog. A silent swap would need the keen-pbr-sx outbounds retargeted between `xrtun` and `sbtun` interfaces, which is not safe to do unattended at boot. Fix the cause and run `keen-pbr-sx core xray` (or restart the service), or go back with `keen-pbr-sx core sing-box`.
+
+Edit `proxy.core` through the web UI or `keen-pbr-sx core`. Changing it by hand in `config.json` does not retarget the interface outbounds.
+
 ## Packaging and the RAM warning
 
 Xray is an optional Entware dependency, not a file in this repository. The packages to install are `xray` and `xray-core` (`opkg install xray`). `xray` is the init and config skeleton; `xray-core` is the binary. Detect with `xray version` and show that text on the Sing-box page next to the core control. Below `26.10.17` the switch is refused: that build still used gVisor for TUN. The page explains the refusal. It does not hide the control.

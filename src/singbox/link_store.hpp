@@ -128,7 +128,8 @@ using SingboxReloadFn = std::function<bool()>;
 using SubscriptionStopFn = std::function<bool()>;
 using SubscriptionDownloadFn = std::function<std::string(const std::string&, const SubscriptionStopFn&)>;
 using SubscriptionClock = std::function<std::int64_t()>;
-// core is "sing-box" or "xray". action is "start" or "stop".
+// core is "sing-box" or "xray". action is "start", "stop" or "alive" (is the
+// process running; nothing is changed).
 // bin and config are the xray executable and xray.json; they are empty for sing-box.
 using CoreProcessFn = std::function<bool(const std::string& core, const std::string& action,
                                           const std::string& bin, const std::string& config)>;
@@ -141,6 +142,15 @@ using InterfaceWaitFn = std::function<bool(const std::vector<std::string>& names
 class SingboxBusy : public std::runtime_error {
 public:
     SingboxBusy() : std::runtime_error("another sing-box operation is in progress") {}
+};
+
+// Outcome of making the configured core run at daemon start or on reload.
+struct CoreStartResult {
+    bool ok{true};
+    // True when Xray was (re)started or xray.json was rewritten.
+    bool changed{false};
+    std::string core;
+    std::string message;
 };
 
 class SingboxLinkService {
@@ -165,6 +175,19 @@ public:
     // interfaces are up.
     SingboxApplyResult switch_core(const std::string& core, const std::string& xray_bin, bool icmptest_groups,
                                    const nlohmann::json& keen_config = nlohmann::json());
+    // proxy.core=xray at daemon start or reload: regenerate xray.json from the
+    // store, start Xray when it is not already running with that file, wait for
+    // every xrtun, then make sure sing-box is off. proxy.core=sing-box does
+    // nothing. There is no fallback to sing-box: on failure the error is kept
+    // (core_error) and sing-box stays off. Never throws.
+    CoreStartResult ensure_core_running();
+    // Stops a sing-box that something else (its own init) started while
+    // proxy.core is xray. True when it was running and has been stopped.
+    bool stop_stray_singbox();
+    // Last ensure_core_running failure, empty when the last attempt worked.
+    std::string core_error() const;
+    // Core, process and interface state for `keen-pbr-sx core status`.
+    nlohmann::json core_status() const;
     nlohmann::json preview(const std::string& link) const;
     // Downloads a subscription and returns nodes plus skipped lines. Does not save.
     nlohmann::json preview_subscription(const std::string& url_or_id) const;
@@ -232,6 +255,7 @@ private:
     mutable RamFn ram_;
     InterfaceWaitFn interface_wait_;
     int interface_wait_ms_{20000};
+    std::string core_error_;
     std::mutex mutation_mutex_;
     mutable std::mutex status_mutex_;
     std::map<std::string, RefreshStatus> refresh_status_;

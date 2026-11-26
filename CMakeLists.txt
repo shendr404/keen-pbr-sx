@@ -295,6 +295,7 @@ set(SOURCES
   src/lists/list_set_usage.cpp
   src/lists/domain_index.cpp
   src/cache/cache_manager.cpp
+  src/cmd/core_cmd.cpp
   src/cmd/dnsmasq_cmd.cpp
   src/cmd/resolver_config.cpp
   src/cmd/status.cpp

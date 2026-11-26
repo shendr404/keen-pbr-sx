@@ -3,8 +3,10 @@
 #include "../src/singbox/link_store.hpp"
 #include "../src/singbox/xray_config.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <stdexcept>
 
 using namespace keen_pbr3;
@@ -503,4 +505,151 @@ TEST_CASE("core_switch_blockers ignores groups with a surviving member") {
         {"dns", {{"servers", nlohmann::json::array({{{"tag", "d"}, {"detour", nullptr}}})}}}};
     CHECK(core_switch_blockers(config, {"sbtun"}).empty());
     CHECK(core_switch_blockers(config, {"sbtun", "xrtun"}).find("route rule 1 -> g") != std::string::npos);
+}
+
+namespace {
+
+struct StartupFixture {
+    std::filesystem::path root;
+    SingboxPaths paths;
+    std::vector<std::string> events;
+    bool xray_alive{false};
+    bool singbox_alive{false};
+    bool interfaces_up{true};
+    bool xray_test_ok{true};
+    std::unique_ptr<SingboxLinkService> service;
+
+    explicit StartupFixture(const std::string& name) {
+        root = std::filesystem::temp_directory_path() / name;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        paths.store = (root / "links.json").string();
+        paths.singbox_config = (root / "sing-box.json").string();
+        write_text(paths.singbox_config, "{}");
+        auto node = store_node("nfake1", "hu_fake", "xrtun", fake_singbox_reality_outbound());
+        write_text(paths.store, nlohmann::json{{"nodes", nlohmann::json::array({node})},
+                                               {"subscriptions", nlohmann::json::array()}}
+                                    .dump());
+        service = std::make_unique<SingboxLinkService>(
+            paths, [](const std::string&, std::string*) { return 0; }, [](const KeeneticSyncRequest&) {},
+            [] { return true; });
+        service->set_core_hooks(
+            [this](const std::string& core, const std::string& action, const std::string&, const std::string&) {
+                if (action == "alive") return core == "xray" ? xray_alive : singbox_alive;
+                events.push_back(core + ":" + action);
+                if (core == "xray") xray_alive = action == "start";
+                if (core == "sing-box") singbox_alive = action == "start";
+                return true;
+            },
+            [this](const std::string&, const std::string&, std::string* error) {
+                events.push_back("xray:test");
+                if (!xray_test_ok && error) *error = "bad config";
+                return xray_test_ok ? 0 : 1;
+            },
+            [](const std::string&) { return std::string("Xray 26.10.29"); }, [] { return 512L * 1024L; });
+        service->set_interface_wait(
+            [this](const std::vector<std::string>&, int) {
+                events.push_back("wait");
+                return interfaces_up;
+            },
+            1000);
+    }
+    ~StartupFixture() { std::filesystem::remove_all(root); }
+};
+
+}  // namespace
+
+TEST_CASE("startup with proxy.core=xray writes xray.json, starts Xray and stops a stray sing-box") {
+    StartupFixture fixture("keen-pbr-sx-xray-startup");
+    fixture.singbox_alive = true;  // S99sing-box got there first
+    fixture.service->set_proxy("xray", "/opt/bin/xray");
+
+    const auto result = fixture.service->ensure_core_running();
+    CHECK(result.ok);
+    CHECK(result.changed);
+    CHECK(fixture.events ==
+          std::vector<std::string>{"xray:test", "xray:start", "wait", "sing-box:stop"});
+    const auto xray = nlohmann::json::parse(read_file(fixture.root / "xray.json"));
+    CHECK(xray["inbounds"][0]["settings"]["name"] == "xrtun");
+    CHECK_FALSE(fixture.singbox_alive);
+    CHECK(fixture.service->core_error().empty());
+
+    // A second call (reload, restart of the service) finds Xray alive with the
+    // same config and its interfaces up: nothing is restarted.
+    fixture.events.clear();
+    const auto again = fixture.service->ensure_core_running();
+    CHECK(again.ok);
+    CHECK_FALSE(again.changed);
+    CHECK(fixture.events == std::vector<std::string>{"wait"});
+
+    // The status shows the live core.
+    const auto status = fixture.service->core_status();
+    CHECK(status["core"] == "xray");
+    CHECK(status["xray_running"] == true);
+    CHECK(status["singbox_running"] == false);
+    CHECK(status["interfaces"][0]["name"] == "xrtun");
+    CHECK(status["interfaces"][0]["up"] == true);
+}
+
+TEST_CASE("startup restarts a dead Xray with the existing config") {
+    StartupFixture fixture("keen-pbr-sx-xray-startup-dead");
+    fixture.service->set_proxy("xray", "");
+    REQUIRE(fixture.service->ensure_core_running().ok);
+    fixture.xray_alive = false;  // the box rebooted
+    fixture.events.clear();
+    const auto result = fixture.service->ensure_core_running();
+    CHECK(result.ok);
+    CHECK(result.changed);
+    CHECK(fixture.events == std::vector<std::string>{"xray:start", "wait"});
+}
+
+TEST_CASE("startup with a failing Xray keeps sing-box off and reports the error") {
+    StartupFixture fixture("keen-pbr-sx-xray-startup-fail");
+    fixture.singbox_alive = true;
+    fixture.interfaces_up = false;
+    fixture.service->set_proxy("xray", "");
+
+    const auto result = fixture.service->ensure_core_running();
+    CHECK_FALSE(result.ok);
+    CHECK(result.message.find("did not bring up xrtun") != std::string::npos);
+    CHECK(result.message.find("/tmp/keen-pbr-sx-xray.log") != std::string::npos);
+    CHECK_FALSE(fixture.xray_alive);
+    // No silent swap: sing-box is stopped, not left or started in Xray's place.
+    CHECK_FALSE(fixture.singbox_alive);
+    CHECK(fixture.service->core_error() == result.message);
+    CHECK(fixture.service->core_status()["error"] == result.message);
+
+    // A config that fails `xray run -test` is reported and nothing is started.
+    StartupFixture rejected("keen-pbr-sx-xray-startup-reject");
+    rejected.xray_test_ok = false;
+    rejected.service->set_proxy("xray", "");
+    const auto bad = rejected.service->ensure_core_running();
+    CHECK_FALSE(bad.ok);
+    CHECK(bad.message == "bad config");
+    CHECK(std::count(rejected.events.begin(), rejected.events.end(), "xray:start") == 0);
+    CHECK_FALSE(std::filesystem::exists(rejected.root / "xray.json"));
+}
+
+TEST_CASE("startup with proxy.core=sing-box touches nothing") {
+    StartupFixture fixture("keen-pbr-sx-xray-startup-singbox");
+    fixture.singbox_alive = true;
+    fixture.service->set_proxy("sing-box", "");
+    const auto result = fixture.service->ensure_core_running();
+    CHECK(result.ok);
+    CHECK_FALSE(result.changed);
+    CHECK(fixture.events.empty());
+    CHECK(fixture.singbox_alive);
+    // The guard only acts when the core is xray.
+    CHECK_FALSE(fixture.service->stop_stray_singbox());
+    CHECK(fixture.singbox_alive);
+}
+
+TEST_CASE("the stray sing-box guard stops sing-box only while the core is xray") {
+    StartupFixture fixture("keen-pbr-sx-xray-guard");
+    fixture.service->set_proxy("xray", "");
+    CHECK_FALSE(fixture.service->stop_stray_singbox());
+    fixture.singbox_alive = true;
+    CHECK(fixture.service->stop_stray_singbox());
+    CHECK_FALSE(fixture.singbox_alive);
+    CHECK(fixture.events == std::vector<std::string>{"sing-box:stop"});
 }
