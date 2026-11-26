@@ -15,7 +15,13 @@
 
 > keen-pbr-sx is an independent project. It is not an official Keenetic product and is not affiliated with or endorsed by Keenetic or Netcraze.
 
-Based on [keen-pbr](https://github.com/maksimkurb/keen-pbr) by Maxim Kurbatov. The license is the original GNU GPL v3 (`LICENSE`). Copyright notices in the source stay with their authors.
+## Attribution
+
+keen-pbr-sx is based on [keen-pbr](https://github.com/maksimkurb/keen-pbr) by Максим Курбатов (Maxim Kurbatov) and is distributed under the same GNU GPL v3 license (`LICENSE`). Copyright notices in the source stay with their authors.
+
+## Авторство
+
+keen-pbr-sx основан на [keen-pbr](https://github.com/maksimkurb/keen-pbr) Максима Курбатова и распространяется на тех же условиях GNU GPL v3 (`LICENSE`). Уведомления об авторских правах в исходниках сохраняются за их авторами.
 
 ## What I run
 
