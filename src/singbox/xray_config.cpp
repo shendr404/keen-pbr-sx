@@ -177,7 +177,8 @@ XrayLinkView parse_vless_for_xray(const std::string& rest) {
     if (network == "ws") {
         nlohmann::json ws = nlohmann::json::object();
         if (!path.empty()) ws["path"] = path;
-        if (!host_header.empty()) ws["headers"] = {{"Host", host_header}};
+        // WebSocketConfig.Host; a "Host" key in headers is deprecated.
+        if (!host_header.empty()) ws["host"] = host_header;
         if (!ws.empty()) stream["wsSettings"] = std::move(ws);
     } else if (network == "grpc") {
         const auto service = query_value(query, "serviceName");
@@ -277,7 +278,7 @@ nlohmann::json xray_stream_from_singbox(const nlohmann::json& outbound, const st
             nlohmann::json ws = nlohmann::json::object();
             if (!path.empty()) ws["path"] = path;
             const auto host = header_host(transport);
-            if (!host.empty()) ws["headers"] = {{"Host", host}};
+            if (!host.empty()) ws["host"] = host;
             if (!ws.empty()) stream["wsSettings"] = std::move(ws);
         } else if (type == "grpc") {
             network = "grpc";
@@ -561,9 +562,10 @@ nlohmann::json render_xray_config(const std::vector<SingboxNode>& nodes, bool al
                             {"settings",
                              {{"name", node.interface_name},
                               {"mtu", mtu},
-                              {"gateway", gateway},
-                              {"autoSystemRoutingTable", false},
-                              {"autoSystemDnsToGateway", false}}}});
+                              // TunConfig.Gateway is []string. keen-pbr-sx routes into the
+                              // TUN itself, so autoSystemRoutingTable (also []string, not a
+                              // bool) and autoSystemDnsToGateway are left out.
+                              {"gateway", nlohmann::json::array({gateway})}}}});
         auto outbound = view.outbound;
         outbound["tag"] = outbound_tag;
         outbounds.push_back(std::move(outbound));

@@ -87,6 +87,8 @@ socks или dokodemo вместе с tun2socks для первой версии
 
 Неудачная проверка живой процесс не останавливает.
 
+TUN-inbound содержит `name`, `mtu` и `gateway`, причём `gateway` это список (`["172.19.1.1/30"]`). `autoSystemRoutingTable` и `autoSystemDnsToGateway` не пишутся: в Xray первое поле это список маршрутов, а не переключатель, а маршрутизацию делает keen-pbr-sx. Для WebSocket `Host` задаётся в `wsSettings.host`; `headers.Host` устарел. Имена и типы полей сверены с исходниками `infra/conf` Xray, а в CI запускается `xray run -test -format json` из официального релиза на конфигах, сгенерированных для всех поддерживаемых транспортов (`tests/test_xray_real.cpp`, для локального запуска задайте `KEEN_PBR_XRAY_BIN`).
+
 ## Запуск, перезагрузка и ребут
 
 Если `proxy.core` равен `xray`, процессом Xray управляет сервис:

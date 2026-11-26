@@ -87,6 +87,8 @@ Switch, in order. The two device names can exist at once, so the new process is 
 
 A failed test never stops the live process.
 
+The TUN inbound carries `name`, `mtu` and `gateway`, and `gateway` is a list (`["172.19.1.1/30"]`). `autoSystemRoutingTable` and `autoSystemDnsToGateway` are not written: in Xray the first one is a list of routes, not a switch, and keen-pbr-sx does the routing. WebSocket takes its `Host` in `wsSettings.host`; `headers.Host` is deprecated. The field names and types are checked against Xray's `infra/conf` sources, and CI runs `xray run -test -format json` from an official release on configs generated from every supported transport (`tests/test_xray_real.cpp`, set `KEEN_PBR_XRAY_BIN` to run it locally).
+
 ## Startup, reload and reboot
 
 With `proxy.core` set to `xray`, the service owns the Xray process:

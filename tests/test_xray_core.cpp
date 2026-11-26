@@ -200,8 +200,11 @@ TEST_CASE("switching to xray renames interfaces and rolls back a failed start") 
     const auto xray = nlohmann::json::parse(read_file(root / "xray.json"));
     CHECK(xray["inbounds"][0]["protocol"] == "tun");
     CHECK(xray["inbounds"][0]["settings"]["name"] == "xrtun");
-    CHECK(xray["inbounds"][0]["settings"]["autoSystemRoutingTable"] == false);
-    CHECK(xray["inbounds"][0]["settings"]["autoSystemDnsToGateway"] == false);
+    // Xray's TunConfig takes gateway as []string and autoSystemRoutingTable as []string:
+    // a bool there makes `xray run -test` fail, so neither auto field is written.
+    CHECK(xray["inbounds"][0]["settings"]["gateway"].is_array());
+    CHECK_FALSE(xray["inbounds"][0]["settings"].contains("autoSystemRoutingTable"));
+    CHECK_FALSE(xray["inbounds"][0]["settings"].contains("autoSystemDnsToGateway"));
     CHECK(xray["inbounds"].size() == 1);
     CHECK(xray["outbounds"][0]["streamSettings"]["network"] == "tcp");
     CHECK(xray["outbounds"][0]["streamSettings"]["realitySettings"]["publicKey"] == "PUBKEY");
@@ -288,7 +291,7 @@ TEST_CASE("sing-box vless reality outbound becomes an xray outbound") {
     CHECK(ws_xray["streamSettings"]["network"] == "ws");
     CHECK(ws_xray["streamSettings"]["security"] == "tls");
     CHECK(ws_xray["streamSettings"]["wsSettings"]["path"] == "/ws");
-    CHECK(ws_xray["streamSettings"]["wsSettings"]["headers"]["Host"] == "cdn.example.org");
+    CHECK(ws_xray["streamSettings"]["wsSettings"]["host"] == "cdn.example.org");
     CHECK(ws_xray["streamSettings"]["tlsSettings"]["alpn"][0] == "http/1.1");
 
     auto grpc = fake_singbox_reality_outbound();

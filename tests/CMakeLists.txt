@@ -33,6 +33,7 @@ add_executable(keen-pbr-sx-tests
   test_dnsmasq_real.cpp
   test_test_routing.cpp
   test_core_cmd.cpp
+  test_xray_real.cpp
   test_keenetic_dns.cpp
   test_dns_balancer.cpp
   test_dns_check.cpp
